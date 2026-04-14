@@ -1,0 +1,1495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Medallion Architecture - Autonomous Troubleshooting with AWS DevOps Agent
+  Bronze (S3) → Silver (S3) → Gold (S3)
+  AgentCore Gateway + Spark MCP + MWAA Orchestration
+
+Parameters:
+  GitHubScriptsBaseUrl:
+    Type: String
+    Default: https://raw.githubusercontent.com/aws-samples/aws-emr-utilities/main/utilities/apache-spark-agents/medallion-architecture
+    Description: Base URL for Glue scripts and DAG on GitHub (no trailing slash)
+  WebhookUrl:
+    Type: String
+    NoEcho: true
+    AllowedPattern: ^https://.*$
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+Resources:
+  # ============================================================
+  # S3 Buckets
+  # ============================================================
+  GlueScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-glue-scripts-${AWS::AccountId}'
+      AccessControl: Private
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 1
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        LogFilePrefix: access-logs/
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  GlueScriptsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref GlueScriptsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnforceHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${GlueScriptsBucket}'
+              - !Sub 'arn:aws:s3:::${GlueScriptsBucket}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-datalake-${AWS::AccountId}'
+      AccessControl: Private
+      ObjectLockEnabled: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        LogFilePrefix: datalake-access-logs/
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDeleteTempFiles
+            Status: Enabled
+            Prefix: temp/
+            ExpirationInDays: 1
+
+  DataLakeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataLakeBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnforceHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}'
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  MwaaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-mwaa-nolock-${AWS::AccountId}'
+      AccessControl: Private
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        LogFilePrefix: mwaa-access-logs/
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # MwaaBucketPolicy removed - EnforceHTTPS Deny policy blocks MWAA internal DAG sync
+  # MWAA manages its own S3 access; bucket is already private with encryption enabled
+
+  # ============================================================
+  # Lambda Security Group (for VPC-attached Lambdas)
+  # ============================================================
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC-attached Lambda functions
+      VpcId: !Ref GlueVPC
+      SecurityGroupEgress:
+        - Description: HTTPS to AWS VPC endpoints
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+        - Description: HTTPS to external endpoints via NAT
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lambda-sg'
+
+  # ============================================================
+  # Lambda DLQ Queues
+  # ============================================================
+  ScriptPopulatorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-script-populator-dlq'
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs  # Note: 'KmsMasterKeyId' is an AWS CloudFormation API property name
+
+  WebHookExecutorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-webhook-executor-dlq'
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs  # Note: 'KmsMasterKeyId' is an AWS CloudFormation API property name
+
+  SparkMcpProxyDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-spark-mcp-proxy-dlq'
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs  # Note: 'KmsMasterKeyId' is an AWS CloudFormation API property name
+
+  # ============================================================
+  # Auto-populate scripts from GitHub
+  # ============================================================
+  ScriptPopulatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ScriptPopulator'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref ScriptPopulatorPolicy
+
+  ScriptPopulatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-ScriptPopulatorPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:PutObject', 's3:DeleteObject']
+            Resource:
+              - !Sub 'arn:aws:s3:::${GlueScriptsBucket}/*'
+              - !Sub 'arn:aws:s3:::${MwaaBucket}/*'
+          - Effect: Allow
+            Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-ScriptPopulator:*'
+          - Effect: Allow
+            Action: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface']
+            Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action: ['ec2:DescribeNetworkInterfaces']
+            Resource: '*'
+          - Effect: Allow
+            Action: ['sqs:SendMessage']
+            Resource: !GetAtt ScriptPopulatorDLQ.Arn
+
+  ScriptPopulatorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ScriptPopulatorPolicy
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ScriptPopulator'
+      Runtime: python3.14
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 256
+      ReservedConcurrentExecutions: 5
+      Role: !GetAtt ScriptPopulatorRole.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt ScriptPopulatorDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref MwaaSubnet1
+          - !Ref MwaaSubnet2
+      Code:
+        ZipFile: |
+          import json, urllib.request, boto3, cfnresponse
+          s3 = boto3.client('s3')
+          def handler(event, context):
+              try:
+                  props = event['ResourceProperties']
+                  base_url = props['GitHubBaseUrl']
+                  glue_bucket = props['GlueBucket']
+                  mwaa_bucket = props['MwaaBucket']
+                  files = json.loads(props['Files'])
+                  if event['RequestType'] in ['Create', 'Update']:
+                      for f in files:
+                          url = f"{base_url}/{f['src']}"
+                          print(f"Downloading {url}")
+                          resp = urllib.request.urlopen(url)
+                          content = resp.read()
+                          bucket = glue_bucket if f['dest'].startswith('scripts/') else mwaa_bucket
+                          key = f['dest']
+                          print(f"Uploading to s3://{bucket}/{key}")
+                          s3.put_object(Bucket=bucket, Key=key, Body=content)
+                  elif event['RequestType'] == 'Delete':
+                      for f in files:
+                          bucket = glue_bucket if f['dest'].startswith('scripts/') else mwaa_bucket
+                          try:
+                              s3.delete_object(Bucket=bucket, Key=f['dest'])
+                          except Exception:
+                              pass
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': 'OK'})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  # PopulateScripts disabled - scripts uploaded manually to S3
+  # Re-enable when public GitHub repo is available
+  SkipScriptPopulation:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Note: PopulateScripts custom resource disabled for local development
+
+  # ============================================================
+  # VPC for Glue jobs
+  # ============================================================
+  GlueVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-glue-vpc'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GlueVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GlueVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-2'
+
+  GlueSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glue connection security group
+      VpcId: !Ref GlueVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-glue-sg'
+
+  GlueSGSelfRefIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref GlueSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref GlueSecurityGroup
+      Description: Self-referencing rule for Glue Spark executor communication
+
+  # S3 VPC Endpoint so Glue can reach S3 from within the VPC
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref MwaaRouteTable
+
+  # Interface VPC Endpoints for private connectivity (eliminates 0.0.0.0/0 egress)
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC Interface Endpoints
+      VpcId: !Ref GlueVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpce-sg'
+
+  LogsVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SQSVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sqs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  GlueVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.glue'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  RedshiftVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.redshift'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref GlueVPC
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # MWAA subnets (separate, with NAT for internet access)
+  MwaaSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GlueVPC
+      CidrBlock: 10.0.10.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-mwaa-1'
+
+  MwaaSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GlueVPC
+      CidrBlock: 10.0.11.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-mwaa-2'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref GlueVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GlueVPC
+      CidrBlock: 10.0.100.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref GlueVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  MwaaRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref GlueVPC
+
+  MwaaRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref MwaaRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  MwaaSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MwaaSubnet1
+      RouteTableId: !Ref MwaaRouteTable
+
+  MwaaSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MwaaSubnet2
+      RouteTableId: !Ref MwaaRouteTable
+
+  MwaaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MWAA environment security group
+      VpcId: !Ref GlueVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/16
+
+  S3PrefixList:
+    Type: AWS::EC2::PrefixList
+    Properties:
+      PrefixListName: !Sub '${AWS::StackName}-s3-prefix'
+      AddressFamily: IPv4
+      MaxEntries: 5
+      Entries:
+        - Cidr: 3.5.0.0/19
+          Description: S3 us-west-2
+
+  MwaaSGSelfRefHttps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MwaaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref MwaaSecurityGroup
+
+  MwaaSGSelfRefPostgres:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MwaaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref MwaaSecurityGroup
+
+  # ============================================================
+  # KMS Keys
+  # ============================================================
+  SecretsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Secrets Manager encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowSecretsManager
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action: ['kms:Decrypt', 'kms:GenerateDataKey']
+            Resource: '*'
+
+  LambdaEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Lambda environment variable encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowLambda
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: ['kms:Decrypt', 'kms:DescribeKey']
+            Resource: '*'
+
+  CloudWatchLogsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for CloudWatch Logs encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action: ['kms:Encrypt*', 'kms:Decrypt*', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:Describe*']
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+
+  # ============================================================
+  # Secrets Manager
+  # ============================================================
+  WebHookCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-webhook-credentials'
+      Description: DevOps Agent WebHook credentials
+      SecretString: !Sub '{"webhookUrl":"${WebhookUrl}","webhookSecret":"${WebhookSecret}"}'
+      KmsKeyId: !Ref SecretsEncryptionKey
+
+  RedshiftCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-redshift-credentials'
+      Description: Redshift admin credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"admin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: ' "/@\'''
+      KmsKeyId: !Ref SecretsEncryptionKey
+
+  # ============================================================
+  # Redshift Cluster
+  # ============================================================
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group for Redshift
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    DependsOn: RedshiftCredentialsSecret
+    Properties:
+      ClusterIdentifier: !Sub '${AWS::StackName}-redshift'
+      DBName: medalliondb
+      MasterUsername: admin
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${RedshiftCredentialsSecret}:SecretString:password}}'
+      NodeType: ra3.large
+      ClusterType: single-node
+      PubliclyAccessible: false
+      Encrypted: true
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref GlueSecurityGroup
+      IamRoles:
+        - !GetAtt RedshiftS3Role.Arn
+
+  RedshiftS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-RedshiftS3Role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref RedshiftS3Policy
+
+  RedshiftS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-RedshiftS3Policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject', 's3:GetBucketLocation']
+            Resource:
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}'
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}/*'
+
+  RedshiftGlueConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      ConnectionInput:
+        Name: !Sub '${AWS::StackName}-redshift-conn'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub
+            - 'jdbc:redshift://${Endpoint}:5439/medalliondb'
+            - Endpoint: !GetAtt RedshiftCluster.Endpoint.Address
+          SECRET_ID: !Ref RedshiftCredentialsSecret
+        PhysicalConnectionRequirements:
+          SubnetId: !Ref PrivateSubnet1
+          SecurityGroupIdList:
+            - !Ref GlueSecurityGroup
+          AvailabilityZone: !Select [0, !GetAZs '']
+
+  # ============================================================
+  # IAM Role - Glue Jobs
+  # ============================================================
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-GlueRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - !Ref GlueJobPolicy
+
+  GlueJobPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-GlueJobPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket']
+            Resource:
+              - !Sub 'arn:aws:s3:::${GlueScriptsBucket}'
+              - !Sub 'arn:aws:s3:::${GlueScriptsBucket}/*'
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}'
+              - !Sub 'arn:aws:s3:::${DataLakeBucket}/*'
+          - Effect: Allow
+            Action: 'redshift:GetClusterCredentials'
+            Resource:
+              - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbgroup:${AWS::StackName}-redshift/*'
+              - !Sub 'arn:aws:redshift:*:${AWS::AccountId}:dbuser:*/*'
+              - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${AWS::StackName}-redshift/medalliondb'
+          - Effect: Allow
+            Action: 'redshift:DescribeClusters'
+            Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${AWS::StackName}-redshift'
+          - Effect: Allow
+            Action: 'glue:GetConnection'
+            Resource:
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${AWS::StackName}-*'
+          - Effect: Allow
+            Action: ['secretsmanager:GetSecretValue']
+            Resource: !Ref RedshiftCredentialsSecret
+          - Effect: Allow
+            Action: ['kms:Decrypt']
+            Resource: !GetAtt SecretsEncryptionKey.Arn
+
+  # ============================================================
+  # Glue Jobs - Bronze, Silver, Gold
+  # ============================================================
+  BronzeGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${AWS::StackName}-Bronze-Job'
+      Description: 'Bronze Layer: Raw e-commerce data ingestion to S3'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${GlueScriptsBucket}/scripts/bronze_layer_ingestion.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-bookmark-option': 'job-bookmark-disable'
+        '--enable-metrics': 'true'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-job-insights': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${GlueScriptsBucket}/sparkHistoryLogs/'
+        '--bronze_output_path': !Sub 's3://${DataLakeBucket}/bronze/ecommerce_orders/'
+      GlueVersion: '4.0'
+      MaxRetries: 0
+      Timeout: 60
+      NumberOfWorkers: 5
+      WorkerType: G.1X
+
+  SilverGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${AWS::StackName}-Silver-Job'
+      Description: 'Silver Layer: Data cleansing, transformation, S3 and Redshift load'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${GlueScriptsBucket}/scripts/silver_layer_transform.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-bookmark-option': 'job-bookmark-disable'
+        '--enable-metrics': 'true'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-job-insights': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${GlueScriptsBucket}/sparkHistoryLogs/'
+        '--bronze_input_path': !Sub 's3://${DataLakeBucket}/bronze/ecommerce_orders/'
+        '--silver_output_path': !Sub 's3://${DataLakeBucket}/silver/ecommerce_orders/'
+        '--redshift_conn_name': !Sub '${AWS::StackName}-redshift-conn'
+        '--redshift_db': 'medalliondb'
+        '--redshift_table': 'public.silver_ecommerce'
+        '--redshift_temp_dir': !Sub 's3://${DataLakeBucket}/temp/redshift/'
+      GlueVersion: '4.0'
+      MaxRetries: 0
+      Timeout: 60
+      NumberOfWorkers: 5
+      WorkerType: G.1X
+      Connections:
+        Connections:
+          - !Ref RedshiftGlueConnection
+
+  GoldGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${AWS::StackName}-Gold-Job'
+      Description: 'Gold Layer: Reads from Redshift, aggregates, writes to Redshift'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${GlueScriptsBucket}/scripts/gold_layer_aggregate.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-bookmark-option': 'job-bookmark-disable'
+        '--enable-metrics': 'true'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-job-insights': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${GlueScriptsBucket}/sparkHistoryLogs/'
+        '--redshift_conn_name': !Sub '${AWS::StackName}-redshift-conn'
+        '--redshift_db': 'medalliondb'
+        '--redshift_source_table': 'public.silver_ecommerce'
+        '--redshift_target_table': 'public.gold_ecommerce_summary'
+        '--redshift_temp_dir': !Sub 's3://${DataLakeBucket}/temp/gold/'
+      GlueVersion: '4.0'
+      MaxRetries: 0
+      Timeout: 30
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Connections:
+        Connections:
+          - !Ref RedshiftGlueConnection
+
+  # ============================================================
+  # MWAA Environment
+  # ============================================================
+  MwaaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-MwaaRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: airflow-env.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref MwaaPolicy
+
+  MwaaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-MwaaPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['airflow:PublishMetrics']
+            Resource: !Sub 'arn:aws:airflow:${AWS::Region}:${AWS::AccountId}:environment/${AWS::StackName}-mwaa'
+          - Effect: Allow
+            Action: ['s3:GetObject*', 's3:GetBucket*', 's3:List*']
+            Resource:
+              - !Sub 'arn:aws:s3:::${MwaaBucket}'
+              - !Sub 'arn:aws:s3:::${MwaaBucket}/*'
+          - Effect: Allow
+            Action: ['logs:CreateLogStream', 'logs:CreateLogGroup', 'logs:PutLogEvents', 'logs:GetLogEvents', 'logs:GetLogRecord', 'logs:GetLogGroupFields', 'logs:GetQueryResults']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-${AWS::StackName}-mwaa-*'
+          - Effect: Allow
+            Action: ['logs:DescribeLogGroups']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          - Effect: Allow
+            Action: ['sqs:ChangeMessageVisibility', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes', 'sqs:GetQueueUrl', 'sqs:ReceiveMessage', 'sqs:SendMessage']
+            Resource: !Sub 'arn:aws:sqs:${AWS::Region}:*:airflow-celery-*'
+          - Effect: Allow
+            Action: ['glue:StartJobRun', 'glue:GetJobRun', 'glue:GetJobRuns', 'glue:BatchStopJobRun', 'glue:GetJob']
+            Resource:
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${AWS::StackName}-*'
+          - Effect: Allow
+            Action: ['logs:FilterLogEvents', 'logs:GetLogEvents', 'logs:DescribeLogStreams']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*'
+          - Effect: Allow
+            Action: ['kms:Decrypt', 'kms:DescribeKey', 'kms:GenerateDataKey*', 'kms:Encrypt']
+            Resource: '*'
+            Condition:
+              StringLike:
+                kms:ViaService: !Sub 'sqs.${AWS::Region}.amazonaws.com'
+
+  MwaaEnvironment:
+    Type: AWS::MWAA::Environment
+    DependsOn: [MwaaBucket, NatGateway, MwaaRoute]
+    Properties:
+      Name: !Sub '${AWS::StackName}-mwaa'
+      AirflowVersion: '2.10.3'
+      EnvironmentClass: mw1.small
+      MaxWorkers: 2
+      MinWorkers: 1
+      SourceBucketArn: !GetAtt MwaaBucket.Arn
+      DagS3Path: dags
+      ExecutionRoleArn: !GetAtt MwaaExecutionRole.Arn
+      WebserverAccessMode: PUBLIC_ONLY
+      NetworkConfiguration:
+        SubnetIds:
+          - !Ref MwaaSubnet1
+          - !Ref MwaaSubnet2
+        SecurityGroupIds:
+          - !Ref MwaaSecurityGroup
+      LoggingConfiguration:
+        DagProcessingLogs:
+          Enabled: true
+          LogLevel: INFO
+        SchedulerLogs:
+          Enabled: true
+          LogLevel: INFO
+        TaskLogs:
+          Enabled: true
+          LogLevel: INFO
+        WebserverLogs:
+          Enabled: true
+          LogLevel: INFO
+        WorkerLogs:
+          Enabled: true
+          LogLevel: INFO
+
+  # Scripts and DAG are auto-populated from GitHub via Custom Resource (PopulateScripts)
+
+  # ============================================================
+  # Lambda - WebHook Executor (EventBridge → DevOps Agent)
+  # ============================================================
+  WebHookExecutorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-WHookRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref WebHookExecutorPolicy
+
+  WebHookExecutorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-WebHookExecutorPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-WebHookExecutor:*'
+          - Effect: Allow
+            Action: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface']
+            Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action: ['ec2:DescribeNetworkInterfaces']
+            Resource: '*'
+          - Effect: Allow
+            Action: ['secretsmanager:GetSecretValue']
+            Resource: !Ref WebHookCredentialsSecret
+          - Effect: Allow
+            Action: ['kms:Decrypt']
+            Resource: !GetAtt SecretsEncryptionKey.Arn
+          - Effect: Allow
+            Action: ['sqs:SendMessage']
+            Resource: !GetAtt WebHookExecutorDLQ.Arn
+
+  WebHookExecutorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-WebHookExecutor'
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt CloudWatchLogsKey.Arn
+
+  WebHookExecutorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WebHookExecutorLogGroup
+      - WebHookExecutorPolicy
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-WebHookExecutor'
+      Description: Invokes DevOps Agent WebHook when Glue job fails
+      Runtime: python3.14
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 128
+      ReservedConcurrentExecutions: 10
+      KmsKeyArn: !GetAtt LambdaEncryptionKey.Arn
+      Role: !GetAtt WebHookExecutorRole.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt WebHookExecutorDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref MwaaSubnet1
+          - !Ref MwaaSubnet2
+      Environment:
+        Variables:
+          SECRET_NAME: !Sub '${AWS::StackName}-webhook-credentials'
+      Code:
+        ZipFile: |
+          import json, hmac, hashlib, base64, os
+          from datetime import datetime
+          import urllib3, boto3
+          http = urllib3.PoolManager()
+          secrets_client = boto3.client('secretsmanager')
+          def handler(event, context):
+              print(f"EventBridge event: {json.dumps(event, default=str)}")
+              secret = json.loads(secrets_client.get_secret_value(SecretId=os.environ['SECRET_NAME'])['SecretString'])
+              detail = event.get('detail', {})
+              job_name = detail.get('jobName', 'Unknown')
+              job_run_id = detail.get('jobRunId', 'Unknown')
+              state = detail.get('state', 'FAILED')
+              message = detail.get('message', 'No error message')
+              region = event.get('region', 'unknown')
+              account = event.get('account', 'Unknown')
+              timestamp = datetime.utcnow().isoformat() + 'Z'
+              payload = json.dumps({
+                  'eventType': 'incident', 'incidentId': f"glue-{job_name}-{job_run_id}",
+                  'action': 'created', 'priority': 'HIGH',
+                  'title': f"Glue Job Failed: {job_name}",
+                  'description': f"AWS Glue job \"{job_name}\" entered {state} state.\nJob Run ID: {job_run_id}\nError: {message}\nRegion: {region}\nAccount: {account}",
+                  'service': 'AWS/Glue', 'timestamp': timestamp,
+                  'affectedResources': [f"arn:aws:glue:{region}:{account}:job/{job_name}"],
+                  'data': {'metadata': detail}
+              })
+              sig = base64.b64encode(hmac.new(secret['webhookSecret'].encode(), f"{timestamp}:{payload}".encode(), hashlib.sha256).digest()).decode()
+              resp = http.request('POST', secret['webhookUrl'], body=payload.encode(), headers={
+                  'Content-Type': 'application/json', 'x-amzn-event-signature': sig, 'x-amzn-event-timestamp': timestamp
+              })
+              print(f"WebHook response: Status={resp.status}")
+              return {'statusCode': resp.status}
+
+  WebHookExecutorAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref WebHookExecutorFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+
+  WebHookExecutorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebHookExecutorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GlueJobFailureRule.Arn
+
+  # ============================================================
+  # EventBridge Rule - Glue Job Failure Detection
+  # ============================================================
+  GlueJobFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-Glue-Job-Failure'
+      Description: !Sub 'Triggers DevOps Agent when ${AWS::StackName} Glue jobs fail'
+      EventPattern:
+        source: [aws.glue]
+        detail-type: [Glue Job State Change]
+        detail:
+          state: [FAILED, TIMEOUT, ERROR]
+          jobName:
+            - prefix: !Sub '${AWS::StackName}-'
+      Targets:
+        - Arn: !GetAtt WebHookExecutorFunction.Arn
+          Id: InvokeWebHookExecutor
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 3
+            MaximumEventAgeInSeconds: 3600
+
+  EventBridgeDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-eventbridge-dlq'
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs  # Note: 'KmsMasterKeyId' is an AWS CloudFormation API property name
+
+  EventBridgeDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref EventBridgeDLQ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt EventBridgeDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt GlueJobFailureRule.Arn
+
+  # ============================================================
+  # Spark MCP SigV4 Proxy Lambda
+  # ============================================================
+  SparkMcpProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-McpProxy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SparkMcpProxyPolicy
+
+  SparkMcpProxyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-SparkMcpProxyPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-SparkMCP-SigV4-Proxy:*'
+          - Effect: Allow
+            Action: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface']
+            Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action: ['ec2:DescribeNetworkInterfaces']
+            Resource: '*'
+          - Effect: Allow
+            Action: ['sagemaker-unified-studio-mcp:InvokeMcp', 'sagemaker-unified-studio-mcp:CallReadOnlyTool', 'sagemaker-unified-studio-mcp:CallPrivilegedTool']
+            Resource: '*'
+          - Effect: Allow
+            Action: ['glue:GetJobRun', 'glue:GetJobRuns', 'glue:GetJob', 'glue:BatchGetJobs']
+            Resource:
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${AWS::StackName}-*'
+          - Effect: Allow
+            Action: ['logs:GetLogEvents', 'logs:FilterLogEvents', 'logs:DescribeLogGroups', 'logs:DescribeLogStreams']
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          - Effect: Allow
+            Action: ['sqs:SendMessage']
+            Resource: !GetAtt SparkMcpProxyDLQ.Arn
+
+  SparkMcpProxyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-SparkMCP-SigV4-Proxy'
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt CloudWatchLogsKey.Arn
+
+  SparkMcpProxyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - SparkMcpProxyLogGroup
+      - SparkMcpProxyPolicy
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-SparkMCP-SigV4-Proxy'
+      Description: Bridges AgentCore Gateway to Spark MCP Server via SigV4
+      Runtime: python3.14
+      Handler: index.lambda_handler
+      Role: !GetAtt SparkMcpProxyRole.Arn
+      Timeout: 120
+      MemorySize: 128
+      ReservedConcurrentExecutions: 20
+      KmsKeyArn: !GetAtt LambdaEncryptionKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt SparkMcpProxyDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref MwaaSubnet1
+          - !Ref MwaaSubnet2
+      Environment:
+        Variables:
+          MCP_ENDPOINT: 'https://sagemaker-unified-studio-mcp.us-east-1.api.aws/spark-troubleshooting'
+          SIGV4_SERVICE: 'sagemaker-unified-studio-mcp'
+          SIGV4_REGION: 'us-east-1'
+          TOOL_NAME: 'analyze_spark_workload'
+      Code:
+        ZipFile: |
+          import json, os, urllib.request, logging
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          import botocore.session
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def lambda_handler(event, context):
+              logger.info(f"Invocation: {json.dumps(event, default=str)}")
+              delimiter = "___"
+              try:
+                  original = context.client_context.custom['bedrockAgentCoreToolName']
+                  tool_name = original[original.index(delimiter) + len(delimiter):]
+              except Exception:
+                  tool_name = os.environ.get("TOOL_NAME", "analyze_spark_workload")
+              body = json.dumps({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": tool_name, "arguments": event}, "id": 1})
+              url = f"{os.environ['MCP_ENDPOINT']}/mcp"
+              session = botocore.session.get_session()
+              creds = session.get_credentials().get_frozen_credentials()
+              request = AWSRequest(method="POST", url=url, data=body, headers={"Content-Type": "application/json", "Accept": "application/json"})
+              SigV4Auth(creds, os.environ['SIGV4_SERVICE'], os.environ['SIGV4_REGION']).add_auth(request)
+              req = urllib.request.Request(url=url, data=body.encode(), method="POST", headers=dict(request.headers))
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return json.loads(resp.read().decode())
+              except urllib.request.HTTPError as e:
+                  error_body = e.read().decode()
+                  logger.error(f"HTTP {e.code}: {error_body}")
+                  return {"error": error_body, "statusCode": e.code}
+
+  SparkMcpProxyGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SparkMcpProxyFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !GetAtt AgentCoreGateway.GatewayArn
+
+  # ============================================================
+  # Cognito + AgentCore Gateway
+  # ============================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-AgentCore-Auth'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+  CognitoResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Identifier: !Sub '${AWS::StackName}-mcp-proxy'
+      Name: MCP Proxy API
+      Scopes:
+        - ScopeName: invoke
+          ScopeDescription: Invoke MCP tools via AgentCore Gateway
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoResourceServer
+    Properties:
+      ClientName: !Sub '${AWS::StackName}-DevOpsAgent-Client'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      AllowedOAuthFlows: [client_credentials]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes: [!Sub '${AWS::StackName}-mcp-proxy/invoke']
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${AWS::StackName}-${AWS::AccountId}'
+      UserPoolId: !Ref CognitoUserPool
+
+  AgentCoreGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ACGW'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+      ManagedPolicyArns:
+        - !Ref AgentCoreGatewayPolicy
+
+  AgentCoreGatewayPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-AgentCoreGatewayPolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !GetAtt SparkMcpProxyFunction.Arn
+
+  AgentCoreGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub '${AWS::StackName}-SparkMCP-GW'
+      Description: AgentCore Gateway for Spark Troubleshooting MCP Server
+      ProtocolType: MCP
+      RoleArn: !GetAtt AgentCoreGatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}/.well-known/openid-configuration'
+          AllowedClients: [!Ref CognitoUserPoolClient]
+
+  AgentCoreGatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt AgentCoreGateway.GatewayIdentifier
+      Name: spark
+      Description: Lambda target bridging to Spark MCP Server via SigV4
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt SparkMcpProxyFunction.Arn
+            ToolSchema:
+              InlinePayload:
+                - Name: analyze_spark_workload
+                  Description: >-
+                    Comprehensive analysis tool for Apache Spark workloads on AWS (EMR-EC2, Glue, EMR-Serverless).
+                    Provides troubleshooting for failed workloads and optimization insights.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      platform_type:
+                        Type: string
+                        Description: 'AWS platform: EMR_EC2, GLUE, EMR_SERVERLESS, or SAGEMAKER_UNIFIED_STUDIO'
+                      platform_params:
+                        Type: object
+                        Description: 'Platform-specific params. For GLUE: {job_name, job_run_id}.'
+                    Required: [platform_type, platform_params]
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+  # ============================================================
+  # CloudTrail Log Group for Security Monitoring
+  # ============================================================
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}-trail'
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt CloudWatchLogsKey.Arn
+
+  # ============================================================
+  # M8: CloudWatch Alarm - Unauthorized Secrets Manager Access
+  # ============================================================
+  SecretsManagerAccessMetricFilter:
+    DependsOn: CloudTrailLogGroup
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}-trail'
+      FilterPattern: '{ ($.eventSource = "secretsmanager.amazonaws.com") && (($.errorCode = "AccessDenied") || ($.errorCode = "UnauthorizedAccess")) }'
+      MetricTransformations:
+        - MetricNamespace: !Sub '${AWS::StackName}/Security'
+          MetricName: UnauthorizedSecretsManagerAccess
+          MetricValue: '1'
+          DefaultValue: 0
+
+  UnauthorizedSecretsAccessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-UnauthorizedSecretsAccess'
+      AlarmDescription: Alarm when unauthorized access to Secrets Manager is detected
+      Namespace: !Sub '${AWS::StackName}/Security'
+      MetricName: UnauthorizedSecretsManagerAccess
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  SecretsManagerGetSecretMetricFilter:
+    DependsOn: CloudTrailLogGroup
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}-trail'
+      FilterPattern: '{ ($.eventSource = "secretsmanager.amazonaws.com") && ($.eventName = "GetSecretValue") && ($.errorCode NOT EXISTS) }'
+      MetricTransformations:
+        - MetricNamespace: !Sub '${AWS::StackName}/Security'
+          MetricName: SecretsManagerGetSecretValueCalls
+          MetricValue: '1'
+          DefaultValue: 0
+
+  SecretsManagerGetSecretAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-SecretsManagerGetSecretValue'
+      AlarmDescription: Alarm on successful Secrets Manager GetSecretValue calls for credential access monitoring
+      Namespace: !Sub '${AWS::StackName}/Security'
+      MetricName: SecretsManagerGetSecretValueCalls
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+# ============================================================
+# Outputs
+# ============================================================
+Outputs:
+  BronzeJobName:
+    Value: !Ref BronzeGlueJob
+  SilverJobName:
+    Value: !Ref SilverGlueJob
+  GoldJobName:
+    Value: !Ref GoldGlueJob
+  DataLakeBucketName:
+    Value: !Ref DataLakeBucket
+  GlueScriptsBucketName:
+    Value: !Ref GlueScriptsBucket
+  MwaaBucketName:
+    Value: !Ref MwaaBucket
+  MwaaEnvironmentName:
+    Value: !Ref MwaaEnvironment
+  AgentCoreGatewayUrl:
+    Value: !GetAtt AgentCoreGateway.GatewayUrl
+  AgentCoreGatewayId:
+    Value: !GetAtt AgentCoreGateway.GatewayIdentifier
+  CognitoTokenEndpoint:
+    Value: !Sub 'https://${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token'
+  CognitoClientId:
+    Value: !Ref CognitoUserPoolClient
+  EventBridgeRuleName:
+    Value: !Ref GlueJobFailureRule
+  RedshiftClusterEndpoint:
+    Value: !GetAtt RedshiftCluster.Endpoint.Address
