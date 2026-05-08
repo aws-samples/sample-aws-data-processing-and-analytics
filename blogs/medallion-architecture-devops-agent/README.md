@@ -43,12 +43,12 @@ This project deploys a medallion data pipeline (Bronze → Silver → Gold) usin
 ```bash
 aws cloudformation create-stack \
   --stack-name medallion-troubleshooting \
-  --template-body file://cloudformation/blog-medallion-stack.yaml \
+  --template-body file://blog-medallion-stack.yaml \
   --parameters \
     ParameterKey=WebhookUrl,ParameterValue=YOUR-WEBHOOK-URL \
     ParameterKey=WebhookSecret,ParameterValue=YOUR-WEBHOOK-SECRET \
   --capabilities CAPABILITY_NAMED_IAM \
-  --region us-west-2
+  --region <YOUR-REGION>
 ```
 
 ## What Gets Deployed
@@ -84,7 +84,7 @@ The stack creates the following resources:
 ## Cleanup
 
 ```bash
-aws cloudformation delete-stack --stack-name medallion-troubleshooting --region us-west-2
+aws cloudformation delete-stack --stack-name medallion-troubleshooting --region <YOUR-REGION>
 ```
 
 ## Security
