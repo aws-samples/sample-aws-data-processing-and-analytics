@@ -22,7 +22,6 @@ This project deploys a medallion data pipeline (Bronze → Silver → Gold) usin
 |-----------|----------|-------------|
 | `WebhookUrl` | Yes | Your DevOps Agent webhook URL (from Agent Space settings) |
 | `WebhookSecret` | Yes | Webhook secret for authentication (min 16 characters) |
-| `GitHubScriptsBaseUrl` | No | Base URL for scripts (defaults to this repo — no change needed) |
 
 > **Note:** Glue scripts and the MWAA DAG are automatically downloaded from this GitHub repository during stack creation via a Custom Resource Lambda. No manual script upload is required.
 
