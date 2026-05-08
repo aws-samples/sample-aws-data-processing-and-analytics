@@ -7,7 +7,7 @@ Description: >
 Parameters:
   GitHubScriptsBaseUrl:
     Type: String
-    Default: https://raw.githubusercontent.com/aws-samples/aws-emr-utilities/main/utilities/apache-spark-agents/medallion-architecture
+    Default: https://raw.githubusercontent.com/aws-samples/sample-aws-data-processing-and-analytics/main/blogs/medallion-architecture-devops-agent
     Description: Base URL for Glue scripts and DAG on GitHub (no trailing slash)
   WebhookUrl:
     Type: String
@@ -281,12 +281,24 @@ Resources:
                   print(f"Error: {e}")
                   cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
 
-  # PopulateScripts disabled - scripts uploaded manually to S3
-  # Re-enable when public GitHub repo is available
-  SkipScriptPopulation:
-    Type: AWS::CloudFormation::WaitConditionHandle
-    Metadata:
-      Note: PopulateScripts custom resource disabled for local development
+  PopulateScripts:
+    Type: Custom::PopulateScripts
+    DependsOn:
+      - ScriptPopulatorFunction
+      - GlueScriptsBucket
+      - MwaaBucket
+    Properties:
+      ServiceToken: !GetAtt ScriptPopulatorFunction.Arn
+      GitHubBaseUrl: !Ref GitHubScriptsBaseUrl
+      GlueBucket: !Ref GlueScriptsBucket
+      MwaaBucket: !Ref MwaaBucket
+      Files: !Sub |
+        [
+          {"src": "glue-scripts/bronze_layer_ingestion.py", "dest": "scripts/bronze_layer_ingestion.py"},
+          {"src": "glue-scripts/silver_layer_transform.py", "dest": "scripts/silver_layer_transform.py"},
+          {"src": "glue-scripts/gold_layer_aggregate.py", "dest": "scripts/gold_layer_aggregate.py"},
+          {"src": "dags/medallion_pipeline.py", "dest": "dags/medallion_pipeline.py"}
+        ]
 
   # ============================================================
   # VPC for Glue jobs
@@ -818,6 +830,7 @@ Resources:
   # ============================================================
   BronzeGlueJob:
     Type: AWS::Glue::Job
+    DependsOn: PopulateScripts
     Properties:
       Name: !Sub '${AWS::StackName}-Bronze-Job'
       Description: 'Bronze Layer: Raw e-commerce data ingestion to S3'
