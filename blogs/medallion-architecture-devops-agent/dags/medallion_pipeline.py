@@ -1,13 +1,17 @@
 """
 Medallion Architecture DAG - Bronze → Silver → Gold
-Orchestrates 3 Glue jobs sequentially. Triggered manually for blog demo.
+Orchestrates 3 Glue jobs sequentially. Triggered manually for demo.
+Stack name is auto-detected from the MWAA environment name.
 """
 from airflow import DAG
 from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
+import os
 
-STACK_NAME = "blogagent-v6"
+# Auto-detect stack name from MWAA environment (format: <stack-name>-mwaa)
+MWAA_ENV = os.environ.get("MWAA_ENV_NAME", "")
+STACK_NAME = MWAA_ENV.replace("-mwaa", "") if MWAA_ENV else os.environ.get("STACK_NAME", "medallion-demo-v3-20260521")
 
 default_args = {
     "owner": "data-engineering",
@@ -16,13 +20,13 @@ default_args = {
 }
 
 with DAG(
-    dag_id="medallion_architecture_pipeline",
+    dag_id="medallion_pipeline",
     default_args=default_args,
     description="Bronze → Silver → Gold Medallion Architecture with AWS Glue",
     schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
-    tags=["medallion", "glue", "blog-demo"],
+    tags=["medallion", "glue", "devops-agent-demo"],
 ) as dag:
 
     bronze = GlueJobOperator(

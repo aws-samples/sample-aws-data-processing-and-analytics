@@ -234,7 +234,7 @@ Resources:
     DependsOn: ScriptPopulatorPolicy
     Properties:
       FunctionName: !Sub '${AWS::StackName}-ScriptPopulator'
-      Runtime: python3.14
+      Runtime: python3.12
       Handler: index.handler
       Timeout: 120
       MemorySize: 256
@@ -250,7 +250,15 @@ Resources:
           - !Ref MwaaSubnet2
       Code:
         ZipFile: |
-          import json, urllib.request, boto3, cfnresponse
+          import json, urllib.request, boto3
+          from urllib.request import Request, urlopen as _cfn_ul
+          class cfnresponse:
+              SUCCESS = "SUCCESS"
+              FAILED = "FAILED"
+              @staticmethod
+              def send(ev, ctx, st, data):
+                  body = json.dumps({"Status": st, "Reason": "See logs", "PhysicalResourceId": ctx.log_stream_name, "StackId": ev["StackId"], "RequestId": ev["RequestId"], "LogicalResourceId": ev["LogicalResourceId"], "NoEcho": False, "Data": data or {}})
+                  _cfn_ul(Request(ev["ResponseURL"], data=body.encode(), method="PUT", headers={"Content-Type": ""}))
           s3 = boto3.client('s3')
           def handler(event, context):
               try:
@@ -1067,7 +1075,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}-WebHookExecutor'
       Description: Invokes DevOps Agent WebHook when Glue job fails
-      Runtime: python3.14
+      Runtime: python3.12
       Handler: index.handler
       Timeout: 900
       MemorySize: 128
@@ -1243,7 +1251,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}-SparkMCP-SigV4-Proxy'
       Description: Bridges AgentCore Gateway to Spark MCP Server via SigV4
-      Runtime: python3.14
+      Runtime: python3.12
       Handler: index.lambda_handler
       Role: !GetAtt SparkMcpProxyRole.Arn
       Timeout: 120
