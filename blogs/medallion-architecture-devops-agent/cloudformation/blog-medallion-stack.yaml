@@ -251,15 +251,16 @@ Resources:
       Code:
         ZipFile: |
           import json, urllib.request, boto3
-          from urllib.request import Request, urlopen as _cfn_ul
+          from urllib.request import Request, urlopen as _cfn_open
+          s3 = boto3.client('s3')
+          def _cfn_send(ev, ctx, st, data):
+              body = json.dumps({"Status": st, "Reason": "See logs", "PhysicalResourceId": ctx.log_stream_name, "StackId": ev["StackId"], "RequestId": ev["RequestId"], "LogicalResourceId": ev["LogicalResourceId"], "NoEcho": False, "Data": data or {}})
+              _cfn_open(Request(ev["ResponseURL"], data=body.encode(), method="PUT", headers={"Content-Type": ""}))
           class cfnresponse:
               SUCCESS = "SUCCESS"
               FAILED = "FAILED"
               @staticmethod
-              def send(ev, ctx, st, data):
-                  body = json.dumps({"Status": st, "Reason": "See logs", "PhysicalResourceId": ctx.log_stream_name, "StackId": ev["StackId"], "RequestId": ev["RequestId"], "LogicalResourceId": ev["LogicalResourceId"], "NoEcho": False, "Data": data or {}})
-                  _cfn_ul(Request(ev["ResponseURL"], data=body.encode(), method="PUT", headers={"Content-Type": ""}))
-          s3 = boto3.client('s3')
+              def send(ev, ctx, st, data): _cfn_send(ev, ctx, st, data)
           def handler(event, context):
               try:
                   props = event['ResourceProperties']
