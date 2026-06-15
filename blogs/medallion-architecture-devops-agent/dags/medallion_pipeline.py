@@ -10,7 +10,9 @@ from datetime import timedelta
 import os
 
 # Auto-detect stack name from MWAA environment (format: <stack-name>-mwaa)
-MWAA_ENV = os.environ.get("MWAA_ENV_NAME") or os.environ.get("mwaa_env_name")
+# MWAA translates AirflowConfigurationOptions key "env_var.mwaa_env_name" to
+# the environment variable AIRFLOW__ENV_VAR__MWAA_ENV_NAME on the Fargate container.
+MWAA_ENV = os.environ.get("AIRFLOW__ENV_VAR__MWAA_ENV_NAME")
 if not MWAA_ENV:
     raise RuntimeError("MWAA_ENV_NAME environment variable is not set")
 STACK_NAME = MWAA_ENV.replace("-mwaa", "")
