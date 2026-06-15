@@ -36,7 +36,6 @@ with DAG(
     bronze = GlueJobOperator(
         task_id="bronze_layer_ingestion",
         job_name=f"{STACK_NAME}-Bronze-Job",
-        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         verbose=True,
         wait_for_completion=True,
         num_of_dpus=None,
@@ -45,7 +44,6 @@ with DAG(
     silver = GlueJobOperator(
         task_id="silver_layer_transform",
         job_name=f"{STACK_NAME}-Silver-Job",
-        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         verbose=True,
         wait_for_completion=True,
         num_of_dpus=None,
@@ -54,7 +52,6 @@ with DAG(
     gold = GlueJobOperator(
         task_id="gold_layer_aggregate",
         job_name=f"{STACK_NAME}-Gold-Job",
-        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         verbose=True,
         wait_for_completion=True,
         num_of_dpus=None,
