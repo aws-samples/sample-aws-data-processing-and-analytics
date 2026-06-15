@@ -1016,7 +1016,7 @@ Resources:
           Enabled: true
           LogLevel: INFO
       AirflowConfigurationOptions:
-        env_var.MWAA_ENV_NAME: !Sub '${AWS::StackName}-mwaa'
+        env_var.mwaa_env_name: !Sub '${AWS::StackName}-mwaa'
 
   # Scripts and DAG are auto-populated from GitHub via Custom Resource (PopulateScripts)
 
