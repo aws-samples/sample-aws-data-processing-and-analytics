@@ -10,7 +10,7 @@ from datetime import timedelta
 import os
 
 # Auto-detect stack name from MWAA environment (format: <stack-name>-mwaa)
-MWAA_ENV = os.environ.get("MWAA_ENV_NAME")
+MWAA_ENV = os.environ.get("MWAA_ENV_NAME") or os.environ.get("mwaa_env_name")
 if not MWAA_ENV:
     raise RuntimeError("MWAA_ENV_NAME environment variable is not set")
 STACK_NAME = MWAA_ENV.replace("-mwaa", "")
