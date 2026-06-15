@@ -1511,6 +1511,8 @@ Outputs:
     Value: !GetAtt AgentCoreGateway.GatewayIdentifier
   CognitoTokenEndpoint:
     Value: !Sub 'https://${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token'
+  CognitoUserPoolId:
+    Value: !Ref CognitoUserPool
   CognitoClientId:
     Value: !Ref CognitoUserPoolClient
   EventBridgeRuleName:
