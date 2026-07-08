@@ -587,15 +587,6 @@ Resources:
           ToPort: 5432
           CidrIp: 10.0.0.0/16
 
-  S3PrefixList:
-    Type: AWS::EC2::PrefixList
-    Properties:
-      PrefixListName: !Sub '${AWS::StackName}-s3-prefix'
-      AddressFamily: IPv4
-      MaxEntries: 5
-      Entries:
-        - Cidr: 3.5.0.0/19
-          Description: S3 us-west-2
 
   MwaaSGSelfRefHttps:
     Type: AWS::EC2::SecurityGroupIngress
@@ -796,7 +787,7 @@ Resources:
               Service: glue.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSGlueServiceRole'
         - !Ref GlueJobPolicy
 
   GlueJobPolicy:
