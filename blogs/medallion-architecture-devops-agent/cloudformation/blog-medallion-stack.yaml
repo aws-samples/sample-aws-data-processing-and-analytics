@@ -1271,9 +1271,9 @@ Resources:
           - !Ref MwaaSubnet2
       Environment:
         Variables:
-          MCP_ENDPOINT: 'https://sagemaker-unified-studio-mcp.us-east-1.api.aws/spark-troubleshooting'
+          MCP_ENDPOINT: !Sub 'https://sagemaker-unified-studio-mcp.${AWS::Region}.api.aws/spark-troubleshooting'
           SIGV4_SERVICE: 'sagemaker-unified-studio-mcp'
-          SIGV4_REGION: 'us-east-1'
+          SIGV4_REGION: !Ref AWS::Region
           TOOL_NAME: 'analyze_spark_workload'
       Code:
         ZipFile: |
