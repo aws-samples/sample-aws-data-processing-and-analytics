@@ -1,0 +1,487 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Integrate the Apache Spark Troubleshooting Agent for Amazon EMR with AWS DevOps Agent over AWS PrivateLink. Companion template for the AWS Big Data Blog post. Creates a VPC + subnets, an Interface VPC Endpoint for SageMaker Unified Studio MCP, the SigV4 IAM role for AWS DevOps Agent, and a demo EMR Serverless workload. us-east-1 only.'
+
+Parameters:
+
+  TroubleshootingRoleName:
+    Type: String
+    Default: SparkTroubleshootingRole
+    Description: 'Name of the IAM role created for Spark troubleshooting. AWS DevOps Agent assumes this role when calling the Apache Spark Troubleshooting Agent for Amazon EMR (via the SageMaker Unified Studio MCP server).'
+    AllowedPattern: '^[a-zA-Z0-9+=,.@_-]+$'
+    ConstraintDescription: Must be a valid IAM role name
+
+  VpcCidr:
+    Type: String
+    Default: '10.20.0.0/16'
+    Description: 'CIDR block for the dedicated VPC created by this stack. Must not overlap with any existing VPC in the account that you intend to peer with.'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid IPv4 CIDR (e.g., 10.20.0.0/16)
+
+# ----------------------------------------------------------------------------
+# Region-scope guardrail. The AZ values, the SMUS service endpoint name, and
+# the SageMaker Unified Studio MCP endpoint hostname are all region-specific.
+# This template is published for us-east-1 only.
+# ----------------------------------------------------------------------------
+Rules:
+  RegionMustBeUsEast1:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, 'us-east-1']
+        AssertDescription: 'This template is currently published for us-east-1 only. To deploy in other regions, fork the template and adjust the AvailabilityZone values for SMUS-supported AZs.'
+
+Resources:
+
+  # ============================================================================
+  # NETWORKING
+  #
+  # Dedicated VPC with two isolated subnets in SMUS-supported AZs. No internet
+  # gateway, NAT gateway, or custom routes are required:
+  #   - SageMaker Unified Studio MCP is reached via an Interface VPC Endpoint
+  #     attached to these subnets.
+  #   - AWS DevOps Agent's private connection (created separately in the
+  #     console) is a managed VPC Lattice resource gateway. It injects routes
+  #     to the Lattice managed prefix list automatically when it points at
+  #     this VPC's subnets.
+  # ============================================================================
+
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: spark-troubleshooting-devops-agent-vpc
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+
+  DemoSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      AvailabilityZone: us-east-1a
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: spark-troubleshooting-subnet-us-east-1a
+
+  DemoSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      AvailabilityZone: us-east-1c
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: spark-troubleshooting-subnet-us-east-1c
+
+  # ============================================================================
+  # PRIVATELINK
+  #
+  # Interface VPC Endpoint for SageMaker Unified Studio MCP. AWS DevOps Agent
+  # reaches this endpoint via its private connection (a Lattice resource
+  # gateway provisioned in the console). Private DNS is enabled so the public
+  # hostname sagemaker-unified-studio-mcp.us-east-1.api.aws resolves to the
+  # endpoint's private ENIs from inside the VPC.
+  # ============================================================================
+
+  SMUSVPCESecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Inbound 443 from the VPC for the SageMaker Unified Studio MCP Interface VPC Endpoint.
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt DemoVPC.CidrBlock
+          Description: HTTPS from VPC CIDR (DevOps Agent resource gateway lives here)
+      Tags:
+        - Key: Purpose
+          Value: SMUSPrivateLink
+
+  SMUSVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref DemoVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sagemaker-unified-studio-mcp'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref DemoSubnet1, !Ref DemoSubnet2]
+      SecurityGroupIds: [!Ref SMUSVPCESecurityGroup]
+      PrivateDnsEnabled: true
+
+  # ============================================================================
+  # DEMO BUCKET
+  #
+  # Single S3 bucket for both demo data and logs. After the stack deploys, the
+  # reader copies the PySpark script and Parquet dataset from the cloned GitHub
+  # repo into this bucket. EMR Serverless writes Spark event logs and
+  # driver/executor stdout/stderr under the logs/ prefix.
+  # ============================================================================
+
+  DemoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'spark-troubleshooting-demo-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgentDemo
+
+  # ============================================================================
+  # AWS DEVOPS AGENT TROUBLESHOOTING ROLE
+  #
+  # Trust: AWS DevOps Agent service principal (aidevops.amazonaws.com) with
+  # SourceAccount + SourceArn confused-deputy guards as recommended by the
+  # DevOps Agent capability-provider wizard.
+  # ============================================================================
+
+  SparkTroubleshootingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref TroubleshootingRoleName
+      Description: Role assumed by AWS DevOps Agent to invoke the Apache Spark Troubleshooting Agent for Amazon EMR (via the SageMaker Unified Studio MCP server).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowDevOpsAgentAssumeRole
+            Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:service/*'
+          - Sid: AllowSameAccountAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # SMUS MCP invoke permissions
+  MCPInvokeAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: MCPInvokeAccess
+      Roles: [!Ref SparkTroubleshootingRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: InvokeSMUSMcp
+            Effect: Allow
+            Action:
+              - 'sagemaker-unified-studio-mcp:InvokeMcp'
+              - 'sagemaker-unified-studio-mcp:CallReadOnlyTool'
+              - 'sagemaker-unified-studio-mcp:CallPrivilegedTool'
+            Resource: '*'
+
+  # EMR-on-EC2 read permissions (always-on)
+  EMRReadAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: EMRReadAccess
+      Roles: [!Ref SparkTroubleshootingRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EMREC2DescribeAndList
+            Effect: Allow
+            Action:
+              - 'elasticmapreduce:DescribeCluster'
+              - 'elasticmapreduce:DescribeStep'
+              - 'elasticmapreduce:ListSteps'
+              - 'elasticmapreduce:ListClusters'
+              - 'elasticmapreduce:DescribeJobFlows'
+            Resource: '*'
+          - Sid: EMRPersistentAppUI
+            Effect: Allow
+            Action:
+              - 'elasticmapreduce:CreatePersistentAppUI'
+              - 'elasticmapreduce:DescribePersistentAppUI'
+              - 'elasticmapreduce:GetPersistentAppUIPresignedURL'
+            Resource: '*'
+          - Sid: EMRClusterLogsFromS3
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+            Resource: '*'
+
+  # EMR Serverless read permissions (always-on)
+  EMRServerlessReadAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: EMRServerlessReadAccess
+      Roles: [!Ref SparkTroubleshootingRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EMRServerlessDescribeAndList
+            Effect: Allow
+            Action:
+              - 'emr-serverless:GetJobRun'
+              - 'emr-serverless:GetApplication'
+              - 'emr-serverless:ListApplications'
+              - 'emr-serverless:ListJobRuns'
+              - 'emr-serverless:ListJobRunAttempts'
+              - 'emr-serverless:GetDashboardForJobRun'
+              - 'emr-serverless:ListTagsForResource'
+            Resource: '*'
+          - Sid: EMRServerlessCloudWatchLogs
+            Effect: Allow
+            Action:
+              - 'logs:GetLogEvents'
+              - 'logs:FilterLogEvents'
+            Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/emr-serverless/*'
+
+  # AWS Glue read permissions (always-on)
+  GlueReadAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: GlueReadAccess
+      Roles: [!Ref SparkTroubleshootingRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GlueJobReadAccess
+            Effect: Allow
+            Action:
+              - 'glue:GetJob'
+              - 'glue:GetJobRun'
+              - 'glue:GetJobRuns'
+              - 'glue:GetJobs'
+              - 'glue:BatchGetJobs'
+            Resource: '*'
+          - Sid: GlueCloudWatchLogs
+            Effect: Allow
+            Action:
+              - 'logs:GetLogEvents'
+              - 'logs:FilterLogEvents'
+            Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws-glue/*'
+          - Sid: GlueSparkWebUI
+            Effect: Allow
+            Action:
+              - 'glue:RequestLogParsing'
+              - 'glue:GetLogParsingStatus'
+              - 'glue:GetEnvironment'
+              - 'glue:GetStage'
+              - 'glue:GetStages'
+              - 'glue:GetStageFiles'
+              - 'glue:BatchGetStageFiles'
+              - 'glue:GetStageAttempt'
+              - 'glue:GetStageAttemptTaskList'
+              - 'glue:GetStageAttemptTaskSummary'
+              - 'glue:GetExecutors'
+              - 'glue:GetExecutorsThreads'
+              - 'glue:GetStorage'
+              - 'glue:GetStorageUnit'
+              - 'glue:GetQueries'
+              - 'glue:GetQuery'
+              - 'glue:GetDashboardUrl'
+            Resource: '*'
+
+  # S3 read access on the demo bucket for the troubleshooting role.
+  # The agent needs to read the PySpark source code and Spark event logs
+  # to produce line-numbered root cause analysis.
+  SourceCodeAndEventLogsAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SourceCodeAndEventLogsAccess
+      Roles: [!Ref SparkTroubleshootingRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DemoBucketRead
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DemoBucket}'
+              - !Sub 'arn:aws:s3:::${DemoBucket}/*'
+
+  # ============================================================================
+  # DEMO WORKLOAD
+  #
+  # The customer events analytics demo referenced by the blog post.
+  # ============================================================================
+
+  DemoExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EMRServerlessExecutionRole-AnalyticsEvents
+      Description: Execution role assumed by the analytics-events-platform EMR Serverless application's Spark drivers and executors.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: emr-serverless.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AnalyticsEventsExecutionAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DemoBucketRead
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DemoBucket}'
+                  - !Sub 'arn:aws:s3:::${DemoBucket}/*'
+              - Sid: DemoBucketLogsWrite
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DemoBucket}/logs/*'
+              - Sid: EMRServerlessCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogStreams'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/emr-serverless/*'
+
+  DemoApplication:
+    Type: AWS::EMRServerless::Application
+    Properties:
+      Name: analytics-events-platform
+      ReleaseLabel: emr-7.5.0
+      Type: SPARK
+      MaximumCapacity:
+        Cpu: '16 vCPU'
+        Memory: '64 GB'
+        Disk: '42 GB'
+      AutoStopConfiguration:
+        Enabled: true
+        IdleTimeoutMinutes: 15
+      MonitoringConfiguration:
+        ManagedPersistenceMonitoringConfiguration:
+          Enabled: true
+        S3MonitoringConfiguration:
+          LogUri: !Sub 's3://${DemoBucket}/logs/'
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgentDemo
+
+  # ============================================================================
+  # CLOUDWATCH ALARM
+  #
+  # Fires when the EMR Serverless application has any failed job in a 60-second
+  # window. The blog reader references this alarm by name in the AWS DevOps
+  # Agent chat to trigger an investigation through the Apache Spark
+  # Troubleshooting Agent for Amazon EMR.
+  # ============================================================================
+
+  FailedJobsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${DemoApplication}-FailedJobs'
+      AlarmDescription: 'Fires when the analytics-events-platform EMR Serverless application has at least one failed job in a 60-second window. Used by the AWS DevOps Agent + Apache Spark Troubleshooting Agent for Amazon EMR integration blog post to trigger an investigation from the agent chat.'
+      Namespace: AWS/EMRServerless
+      MetricName: FailedJobs
+      Dimensions:
+        - Name: ApplicationId
+          Value: !Ref DemoApplication
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgentDemo
+
+Outputs:
+
+  TroubleshootingRoleArn:
+    Description: ARN of the IAM role to assign in the AWS DevOps Agent capability provider wizard (Authorization Configuration step).
+    Value: !GetAtt SparkTroubleshootingRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TroubleshootingRoleArn'
+
+  TroubleshootingRoleName:
+    Description: Name of the troubleshooting role
+    Value: !Ref SparkTroubleshootingRole
+    Export:
+      Name: !Sub '${AWS::StackName}-TroubleshootingRoleName'
+
+  MCPEndpointURL:
+    Description: SMUS Spark troubleshooting MCP endpoint to register in DevOps Agent capability provider (MCP server details step).
+    Value: !Sub 'https://sagemaker-unified-studio-mcp.${AWS::Region}.api.aws/spark-troubleshooting/mcp'
+
+  MCPServiceName:
+    Description: AWS service name to enter in the DevOps Agent SigV4 authorization step.
+    Value: 'sagemaker-unified-studio-mcp'
+
+  DemoVpcId:
+    Description: ID of the dedicated VPC. Use this when configuring the AWS DevOps Agent private connection in the console.
+    Value: !Ref DemoVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-DemoVpcId'
+
+  DemoSubnetIds:
+    Description: Subnet IDs to use when configuring the AWS DevOps Agent private connection.
+    Value: !Sub '${DemoSubnet1},${DemoSubnet2}'
+
+  SMUSVpcEndpointId:
+    Description: ID of the SageMaker Unified Studio MCP Interface VPC Endpoint.
+    Value: !Ref SMUSVPCEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-SMUSVpcEndpointId'
+
+  SMUSVpcEndpointSecurityGroupId:
+    Description: Security group attached to the SMUS VPC endpoint. Use the same security group when configuring the AWS DevOps Agent private connection.
+    Value: !Ref SMUSVPCESecurityGroup
+
+  DemoApplicationId:
+    Description: EMR Serverless application ID
+    Value: !Ref DemoApplication
+
+  DemoBucket:
+    Description: S3 bucket for demo artifacts (PySpark script under root, Parquet data under data/, Spark logs under logs/). After stack creation, copy the demo files from the cloned GitHub repo into this bucket.
+    Value: !Ref DemoBucket
+
+  DemoExecutionRoleArn:
+    Description: EMR Serverless job execution role ARN
+    Value: !GetAtt DemoExecutionRole.Arn
+
+  FailedJobsAlarmName:
+    Description: Name of the CloudWatch alarm that fires when the demo job fails. Reference this in the AWS DevOps Agent chat (e.g., 'Investigate alarm <name>').
+    Value: !Ref FailedJobsAlarm
+
+  FailedJobsAlarmArn:
+    Description: ARN of the FailedJobs CloudWatch alarm
+    Value: !GetAtt FailedJobsAlarm.Arn
+
+  DemoSubmitJobCommand:
+    Description: Sample command to submit the failing job. Replace <DemoBucket> with the DemoBucket output value if copy-pasting manually.
+    Value: !Sub >
+      aws emr-serverless start-job-run
+      --region ${AWS::Region}
+      --application-id ${DemoApplication}
+      --execution-role-arn ${DemoExecutionRole.Arn}
+      --name daily-customer-events-rollup
+      --job-driver '{"sparkSubmit":{"entryPoint":"s3://${DemoBucket}/customer_events_aggregator.py","entryPointArguments":["${DemoBucket}"],"sparkSubmitParameters":"--conf spark.executor.cores=2 --conf spark.executor.memory=1g --conf spark.executor.pyspark.memory=256m --conf spark.executor.instances=2"}}'
+      --configuration-overrides '{"monitoringConfiguration":{"s3MonitoringConfiguration":{"logUri":"s3://${DemoBucket}/logs/"}}}'
