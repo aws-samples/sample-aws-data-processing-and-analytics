@@ -22,12 +22,19 @@ The CloudFormation template creates:
 
 ## Setup Instructions
 
-### 1. Deploy the CloudFormation stack
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/aws-samples/sample-aws-data-processing-and-analytics.git
+cd sample-aws-data-processing-and-analytics/blogs/devops-agent-spark-mcp-integration
+```
+
+### 2. Deploy the CloudFormation stack
 
 ```bash
 aws cloudformation create-stack \
   --stack-name spark-troubleshooting-demo \
-  --template-url https://raw.githubusercontent.com/aws-samples/sample-aws-data-processing-and-analytics/main/blogs/devops-agent-spark-mcp-integration/cloudformation/spark-troubleshooting-devops-agent-blog.yaml \
+  --template-body file://cloudformation/spark-troubleshooting-devops-agent-blog.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-1
 ```
@@ -44,7 +51,7 @@ Capture the stack outputs:
 aws cloudformation describe-stacks --stack-name spark-troubleshooting-demo --region us-east-1 --query 'Stacks[0].Outputs'
 ```
 
-### 2. Check supported Availability Zones
+### 3. Check supported Availability Zones
 
 The SMUS VPC endpoint service may not support all Availability Zones in every account. If the stack fails with an AZ error, check supported AZs:
 
@@ -55,16 +62,11 @@ aws ec2 describe-vpc-endpoint-services \
   --query 'ServiceDetails[0].AvailabilityZones'
 ```
 
-Then redeploy with supported AZs by updating the subnet configuration in the template.
+Then update the subnet Availability Zones in the template and redeploy.
 
-### 3. Copy demo artifacts to your bucket
-
-Clone this repository and copy the PySpark script and Parquet data into the S3 bucket created by the stack:
+### 4. Copy demo artifacts to your bucket
 
 ```bash
-git clone https://github.com/aws-samples/sample-aws-data-processing-and-analytics.git
-cd sample-aws-data-processing-and-analytics/blogs/devops-agent-spark-mcp-integration
-
 # Get your bucket name from the stack outputs
 DEMO_BUCKET=$(aws cloudformation describe-stacks --stack-name spark-troubleshooting-demo --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`DemoBucket`].OutputValue' --output text)
 
@@ -75,14 +77,14 @@ aws s3 cp scripts/customer_events_aggregator.py s3://$DEMO_BUCKET/customer_event
 aws s3 cp data/ s3://$DEMO_BUCKET/data/ --recursive
 ```
 
-### 4. Configure AWS DevOps Agent
+### 5. Configure AWS DevOps Agent
 
 Follow the blog post to:
 1. Create a private connection pointing to the VPC and subnets from the stack outputs
 2. Register the Apache Spark Troubleshooting MCP server as a capability provider using the `TroubleshootingRoleArn` and `MCPEndpointURL` from the stack outputs
 3. Create an agent space and attach the MCP capability provider
 
-### 5. Submit the failing job
+### 6. Submit the failing job
 
 Use the `DemoSubmitJobCommand` from the stack outputs, or run:
 
