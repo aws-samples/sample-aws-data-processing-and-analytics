@@ -24,22 +24,12 @@ Resources:
   GlueScriptsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::StackName}-glue-scripts-${AWS::AccountId}'
       AccessControl: Private
-      ObjectLockEnabled: true
-      ObjectLockConfiguration:
-        ObjectLockEnabled: Enabled
-        Rule:
-          DefaultRetention:
-            Mode: GOVERNANCE
-            Days: 1
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
       VersioningConfiguration:
         Status: Enabled
-      LoggingConfiguration:
-        LogFilePrefix: access-logs/
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -71,16 +61,12 @@ Resources:
   DataLakeBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::StackName}-datalake-${AWS::AccountId}'
       AccessControl: Private
-      ObjectLockEnabled: true
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
       VersioningConfiguration:
         Status: Enabled
-      LoggingConfiguration:
-        LogFilePrefix: datalake-access-logs/
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -118,15 +104,12 @@ Resources:
   MwaaBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::StackName}-mwaa-nolock-${AWS::AccountId}'
       AccessControl: Private
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
       VersioningConfiguration:
         Status: Enabled
-      LoggingConfiguration:
-        LogFilePrefix: mwaa-access-logs/
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
