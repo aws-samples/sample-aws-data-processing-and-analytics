@@ -18,15 +18,17 @@ Parameters:
     ConstraintDescription: Must be a valid IPv4 CIDR (e.g., 10.20.0.0/16)
 
 # ----------------------------------------------------------------------------
-# Region-scope guardrail. The AZ values, the SMUS service endpoint name, and
-# the SageMaker Unified Studio MCP endpoint hostname are all region-specific.
-# This template is published for us-east-1 only.
+# Region-scope guardrail. The SMUS service endpoint name and the SageMaker
+# Unified Studio MCP endpoint hostname are region-specific. This template is
+# published for us-east-1 only. Subnet AZs are discovered dynamically at
+# deploy time via the SMUSAzDiscovery custom resource, so no per-account AZ
+# tweaking is required.
 # ----------------------------------------------------------------------------
 Rules:
   RegionMustBeUsEast1:
     Assertions:
       - Assert: !Equals [!Ref AWS::Region, 'us-east-1']
-        AssertDescription: 'This template is currently published for us-east-1 only. To deploy in other regions, fork the template and adjust the AvailabilityZone values for SMUS-supported AZs.'
+        AssertDescription: 'This template is currently published for us-east-1 only. To deploy in other regions, fork the template and update the SMUS service endpoint hostname.'
 
 Resources:
 
@@ -55,25 +57,140 @@ Resources:
         - Key: Purpose
           Value: SparkTroubleshootingDevOpsAgent
 
+  # ============================================================================
+  # AZ DISCOVERY (CUSTOM RESOURCE)
+  #
+  # AWS randomizes the physical-AZ-to-logical-AZ mapping per account, so the
+  # logical AZ letters that support the SMUS Interface VPC Endpoint differ from
+  # customer to customer. This custom resource calls
+  # ec2:DescribeVpcEndpointServices at deploy time and returns two AZs the
+  # account actually supports. The subnets below use those values.
+  #
+  # Source of truth for the Python lives at scripts/az_discovery.py in this
+  # repository. Keep both in sync when making changes.
+  # ============================================================================
+
+  SMUSAzDiscoveryLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeVpcEndpointServices
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeVpcEndpointServices
+                Resource: '*'
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+
+  SMUSAzDiscoveryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Returns two Availability Zones that support the SageMaker Unified Studio MCP endpoint service in this account.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt SMUSAzDiscoveryLambdaRole.Arn
+      Code:
+        ZipFile: |
+          """AZ discovery for SMUS Interface VPC Endpoint. See
+          scripts/az_discovery.py in this repository for the source-of-truth
+          copy of this code."""
+          import json
+          import urllib.request
+          import boto3
+
+
+          def send_cfn_response(event, context, status, data, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  event["ResponseURL"],
+                  data=body,
+                  method="PUT",
+                  headers={"Content-Type": ""},
+              )
+              urllib.request.urlopen(req, timeout=10)
+
+
+          def lambda_handler(event, context):
+              if event["RequestType"] == "Delete":
+                  send_cfn_response(event, context, "SUCCESS", {})
+                  return
+
+              region = context.invoked_function_arn.split(":")[3]
+              service_name = f"com.amazonaws.{region}.sagemaker-unified-studio-mcp"
+
+              try:
+                  ec2 = boto3.client("ec2", region_name=region)
+                  response = ec2.describe_vpc_endpoint_services(ServiceNames=[service_name])
+                  details = response.get("ServiceDetails", [])
+                  if not details:
+                      raise RuntimeError(
+                          f"VPC endpoint service {service_name} not found in {region}."
+                      )
+                  azs = details[0].get("AvailabilityZones", [])
+                  if len(azs) < 2:
+                      raise RuntimeError(
+                          f"SMUS endpoint service is available in only {len(azs)} AZ(s) "
+                          f"in this account: {azs}. At least two are required."
+                      )
+                  data = {
+                      "SubnetAZ1": azs[0],
+                      "SubnetAZ2": azs[1],
+                      "AllAZs": ",".join(azs),
+                  }
+                  print(f"SMUS AZs available: {azs}. Selected {azs[0]} and {azs[1]}.")
+                  send_cfn_response(event, context, "SUCCESS", data)
+              except Exception as exc:
+                  print(f"AZ discovery failed: {exc}")
+                  send_cfn_response(event, context, "FAILED", {}, reason=str(exc))
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+
+  SMUSAzDiscovery:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SMUSAzDiscoveryFunction.Arn
+
   DemoSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref DemoVPC
-      AvailabilityZone: us-east-1a
+      AvailabilityZone: !GetAtt SMUSAzDiscovery.SubnetAZ1
       CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
       Tags:
         - Key: Name
-          Value: spark-troubleshooting-subnet-us-east-1a
+          Value: spark-troubleshooting-subnet-1
 
   DemoSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref DemoVPC
-      AvailabilityZone: us-east-1c
+      AvailabilityZone: !GetAtt SMUSAzDiscovery.SubnetAZ2
       CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
       Tags:
         - Key: Name
-          Value: spark-troubleshooting-subnet-us-east-1c
+          Value: spark-troubleshooting-subnet-2
 
   # ============================================================================
   # PRIVATELINK
