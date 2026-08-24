@@ -254,6 +254,166 @@ Resources:
           Value: SparkTroubleshootingDevOpsAgentDemo
 
   # ============================================================================
+  # BUCKET CLEANUP (CUSTOM RESOURCE)
+  #
+  # AWS CloudFormation refuses to delete a non-empty S3 bucket. During the
+  # demo, DemoBucket accumulates Spark event logs and driver/executor logs,
+  # plus whatever the reader has manually uploaded. Without this Lambda, the
+  # reader must run `aws s3 rm s3://<bucket> --recursive` before deleting the
+  # stack. With it, `cloudformation delete-stack` is enough.
+  #
+  # The custom resource depends on both the Lambda (via ServiceToken) and on
+  # DemoBucket (via DependsOn). CloudFormation deletes in reverse dependency
+  # order, so on stack delete the Delete event fires while both the Lambda
+  # and the bucket still exist. The Lambda empties the bucket, then CFN
+  # deletes the bucket, then the Lambda, then its role.
+  #
+  # Source of truth for the Python lives at scripts/bucket_cleanup.py in
+  # this repository. Keep both in sync when making changes.
+  # ============================================================================
+
+  BucketCleanupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EmptyDemoBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                Resource: !Sub 'arn:aws:s3:::${DemoBucket}'
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${DemoBucket}/*'
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+
+  BucketCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Empties the demo S3 bucket on stack delete so CloudFormation can then delete the bucket itself.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 300
+      Role: !GetAtt BucketCleanupLambdaRole.Arn
+      Code:
+        ZipFile: |
+          """Bucket cleanup custom resource. See
+          scripts/bucket_cleanup.py in this repository for the source-of-truth
+          copy of this code."""
+          import json
+          import urllib.request
+          import boto3
+
+
+          def send_cfn_response(event, context, status, data, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  event["ResponseURL"],
+                  data=body,
+                  method="PUT",
+                  headers={"Content-Type": ""},
+              )
+              urllib.request.urlopen(req, timeout=10)
+
+
+          def empty_bucket(bucket_name):
+              s3 = boto3.client("s3")
+              total_deleted = 0
+
+              paginator = s3.get_paginator("list_object_versions")
+              for page in paginator.paginate(Bucket=bucket_name):
+                  to_delete = []
+                  for obj in page.get("Versions", []) + page.get("DeleteMarkers", []):
+                      to_delete.append({"Key": obj["Key"], "VersionId": obj["VersionId"]})
+                  while to_delete:
+                      batch, to_delete = to_delete[:1000], to_delete[1000:]
+                      s3.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
+                      total_deleted += len(batch)
+
+              paginator = s3.get_paginator("list_objects_v2")
+              for page in paginator.paginate(Bucket=bucket_name):
+                  to_delete = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                  while to_delete:
+                      batch, to_delete = to_delete[:1000], to_delete[1000:]
+                      s3.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
+                      total_deleted += len(batch)
+
+              return total_deleted
+
+
+          def lambda_handler(event, context):
+              request_type = event["RequestType"]
+              props = event.get("ResourceProperties", {})
+              bucket_name = props.get("BucketName")
+
+              if request_type in ("Create", "Update"):
+                  send_cfn_response(event, context, "SUCCESS", {"BucketName": bucket_name or ""})
+                  return
+
+              # Delete
+              try:
+                  if not bucket_name:
+                      print("No BucketName in ResourceProperties; skipping empty.")
+                      send_cfn_response(event, context, "SUCCESS", {})
+                      return
+                  print(f"Emptying s3://{bucket_name} …")
+                  deleted = empty_bucket(bucket_name)
+                  print(f"Deleted {deleted} object(s) / version(s) from {bucket_name}.")
+                  send_cfn_response(event, context, "SUCCESS", {"Deleted": str(deleted)})
+              except boto3.exceptions.botocore.exceptions.ClientError as exc:  # type: ignore[attr-defined]
+                  code = exc.response.get("Error", {}).get("Code", "")
+                  if code in ("NoSuchBucket", "404"):
+                      print(f"Bucket {bucket_name} does not exist. Nothing to empty.")
+                      send_cfn_response(event, context, "SUCCESS", {})
+                      return
+                  print(f"Bucket empty failed: {exc}")
+                  send_cfn_response(event, context, "FAILED", {}, reason=str(exc))
+              except Exception as exc:
+                  print(f"Bucket empty failed: {exc}")
+                  send_cfn_response(event, context, "FAILED", {}, reason=str(exc))
+      Tags:
+        - Key: Purpose
+          Value: SparkTroubleshootingDevOpsAgent
+
+  BucketCleanup:
+    Type: AWS::CloudFormation::CustomResource
+    # Explicit DependsOn ensures the custom resource's Delete event fires
+    # BEFORE the bucket is deleted at stack teardown time. Without this,
+    # CFN could delete the bucket in parallel with the custom resource and
+    # the bucket-not-empty error returns.
+    DependsOn: DemoBucket
+    Properties:
+      ServiceToken: !GetAtt BucketCleanupFunction.Arn
+      # Pass the bucket name in as a property so the Lambda can read it from
+      # event.ResourceProperties.BucketName. Never resolve !Ref inside the
+      # ZipFile — the Lambda code is a static string.
+      BucketName: !Ref DemoBucket
+
+  # ============================================================================
   # AWS DEVOPS AGENT TROUBLESHOOTING ROLE
   #
   # Trust: AWS DevOps Agent service principal (aidevops.amazonaws.com) with
