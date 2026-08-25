@@ -7,12 +7,13 @@ The demo shows how to register the Apache Spark Troubleshooting Agent for Amazon
 ## Architecture
 
 The CloudFormation template creates:
-- A dedicated VPC with two subnets in SMUS-supported Availability Zones
+- A dedicated VPC with two subnets. The Availability Zones are discovered dynamically at deploy time by a Lambda-backed custom resource — see `scripts/az_discovery.py` — so the same template works in any account regardless of the account's physical-AZ-to-logical-AZ mapping.
 - An Interface VPC Endpoint for SageMaker Unified Studio MCP (private DNS enabled)
 - An IAM role (`SparkTroubleshootingRole`) trusted by AWS DevOps Agent
 - IAM policies for MCP invoke, EMR/EMR Serverless/Glue read access, and S3 access
 - An EMR Serverless application (`analytics-events-platform`)
 - An S3 bucket for demo artifacts (script, data, and Spark logs)
+- A Lambda-backed custom resource — see `scripts/bucket_cleanup.py` — that empties the demo bucket automatically on stack delete, so `cloudformation delete-stack` succeeds without a manual `aws s3 rm --recursive` step
 - A CloudWatch alarm that fires on failed jobs
 
 ## Prerequisites
@@ -51,20 +52,7 @@ Capture the stack outputs:
 aws cloudformation describe-stacks --stack-name spark-troubleshooting-demo --region us-east-1 --query 'Stacks[0].Outputs'
 ```
 
-### 3. Check supported Availability Zones
-
-The SMUS VPC endpoint service may not support all Availability Zones in every account. If the stack fails with an AZ error, check supported AZs:
-
-```bash
-aws ec2 describe-vpc-endpoint-services \
-  --service-names com.amazonaws.us-east-1.sagemaker-unified-studio-mcp \
-  --region us-east-1 \
-  --query 'ServiceDetails[0].AvailabilityZones'
-```
-
-Then update the subnet Availability Zones in the template and redeploy.
-
-### 4. Copy demo artifacts to your bucket
+### 3. Copy demo artifacts to your bucket
 
 ```bash
 # Get your bucket name from the stack outputs
@@ -77,14 +65,14 @@ aws s3 cp scripts/customer_events_aggregator.py s3://$DEMO_BUCKET/customer_event
 aws s3 cp data/ s3://$DEMO_BUCKET/data/ --recursive
 ```
 
-### 5. Configure AWS DevOps Agent
+### 4. Configure AWS DevOps Agent
 
 Follow the blog post to:
 1. Create a private connection pointing to the VPC and subnets from the stack outputs
 2. Register the Apache Spark Troubleshooting MCP server as a capability provider using the `TroubleshootingRoleArn` and `MCPEndpointURL` from the stack outputs
 3. Create an agent space and attach the MCP capability provider
 
-### 6. Submit the failing job
+### 5. Submit the failing job
 
 Use the `DemoSubmitJobCommand` from the stack outputs, or run:
 
@@ -103,20 +91,24 @@ aws emr-serverless start-job-run \
 
 ### 6. Investigate with AWS DevOps Agent
 
-After the job fails (~2 minutes), the CloudWatch alarm fires. In AWS DevOps Agent, navigate to Operator Access → Incidents and start an investigation referencing the alarm name from the stack outputs.
+After the job fails (~3–4 minutes), the CloudWatch alarm fires. In AWS DevOps Agent, navigate to Operator Access → Incidents and start an investigation referencing the alarm name from the stack outputs.
 
 ## Clean Up
 
-```bash
-# Empty the S3 bucket
-aws s3 rm s3://$DEMO_BUCKET --recursive
+Order matters here. The AWS DevOps Agent private connection provisions network interfaces (ENIs) into the stack's subnets. If those ENIs still exist at stack-delete time, CloudFormation fails to delete the subnets. Remove the private connection first, then delete the stack.
 
-# Delete the stack
-aws cloudformation delete-stack --stack-name spark-troubleshooting-demo --region us-east-1
-aws cloudformation wait stack-delete-complete --stack-name spark-troubleshooting-demo --region us-east-1
-```
+1. **In the AWS DevOps Agent console**, in your agent space's MCP Server section, choose **Remove** for the `spark-troubleshooting` capability provider.
+2. **In Capability Providers**, choose **Deregister** for `spark-troubleshooting`.
+3. **In Capability Providers → Private connections**, choose **Delete** for the private connection. Wait until it's gone from the console list (~1–2 minutes).
+4. **(Optional) Delete the agent space** if you no longer need it.
+5. **Then run**:
 
-Also remove the private connection, capability provider, and agent space from the AWS DevOps Agent console.
+    ```bash
+    aws cloudformation delete-stack --stack-name spark-troubleshooting-demo --region us-east-1
+    aws cloudformation wait stack-delete-complete --stack-name spark-troubleshooting-demo --region us-east-1
+    ```
+
+No manual `aws s3 rm` is required — a Lambda-backed custom resource empties the demo bucket automatically as part of the stack delete.
 
 ## Repository Structure
 
@@ -126,7 +118,9 @@ blogs/devops-agent-spark-mcp-integration/
 ├── cloudformation/
 │   └── spark-troubleshooting-devops-agent-blog.yaml
 ├── scripts/
-│   └── customer_events_aggregator.py
+│   ├── customer_events_aggregator.py
+│   ├── az_discovery.py
+│   └── bucket_cleanup.py
 └── data/
     ├── part-00000-50ad5776-dac8-4d0a-b490-923ac93f9f7e-c000.snappy.parquet
     └── part-00001-50ad5776-dac8-4d0a-b490-923ac93f9f7e-c000.snappy.parquet
@@ -135,7 +129,7 @@ blogs/devops-agent-spark-mcp-integration/
 | Directory | Contents |
 |-----------|----------|
 | `cloudformation/` | CloudFormation template for the full demo infrastructure |
-| `scripts/` | Deliberately-failing PySpark script (demo workload) |
+| `scripts/` | `customer_events_aggregator.py` is the deliberately-failing PySpark script the demo runs. `az_discovery.py` and `bucket_cleanup.py` are readable source-of-truth copies of the two custom-resource Lambdas whose code is embedded inline in the CloudFormation template (`ZipFile`). The customer does not upload these two files anywhere; they exist only for humans reading the repo. |
 | `data/` | Sample customer events Parquet data |
 
 ## Region Support
