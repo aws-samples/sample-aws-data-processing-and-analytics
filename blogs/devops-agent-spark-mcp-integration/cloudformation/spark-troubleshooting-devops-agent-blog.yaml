@@ -406,6 +406,18 @@ Resources:
     # CFN could delete the bucket in parallel with the custom resource and
     # the bucket-not-empty error returns.
     DependsOn: DemoBucket
+    Metadata:
+      # cfn-lint W3005 flags this DependsOn as redundant because
+      # BucketName below already references DemoBucket via !Ref. The !Ref
+      # gives us a create-order dependency, but the explicit DependsOn
+      # is what guarantees delete-order: the custom resource is deleted
+      # before the bucket at teardown, so the Lambda has a live bucket
+      # to empty. This is a deliberate design choice; the warning is
+      # suppressed only for this specific resource.
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3005
     Properties:
       ServiceToken: !GetAtt BucketCleanupFunction.Arn
       # Pass the bucket name in as a property so the Lambda can read it from
@@ -453,6 +465,15 @@ Resources:
   # SMUS MCP invoke permissions
   MCPInvokeAccess:
     Type: AWS::IAM::Policy
+    Metadata:
+      # cfn-lint W3037 flags 'sagemaker-unified-studio-mcp' as unknown because
+      # cfn-lint's built-in list of IAM service prefixes has not yet caught up
+      # with this newly released service. The prefix is valid — AWS DevOps
+      # Agent uses these exact actions to invoke the MCP server.
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037
     Properties:
       PolicyName: MCPInvokeAccess
       Roles: [!Ref SparkTroubleshootingRole]
