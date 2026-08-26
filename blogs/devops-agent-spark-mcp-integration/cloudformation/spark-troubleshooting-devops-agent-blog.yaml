@@ -236,14 +236,38 @@ Resources:
   # driver/executor stdout/stderr under the logs/ prefix.
   # ============================================================================
 
+  # checkov:skip=CKV_AWS_18: Access logging is not enabled for this demo bucket. The bucket is short-lived (created and destroyed by the blog reader within a single walkthrough); adding a second bucket to receive access logs is out of scope for the demo template.
   DemoBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      guard:
+        # cfn-guard suppressions with justification:
+        # - S3_BUCKET_DEFAULT_LOCK_ENABLED: Object Lock (WORM retention) would
+        #   prevent the BucketCleanup Lambda from emptying this bucket at
+        #   stack teardown. Object Lock is intentionally not enabled.
+        # - S3_BUCKET_LOGGING_ENABLED: Access logging requires a second S3
+        #   bucket to receive logs, which is out of scope for the short-lived
+        #   demo bucket. Same rationale as the Checkov CKV_AWS_18 skip above.
+        SuppressedRules:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED
+          - S3_BUCKET_LOGGING_ENABLED
     Properties:
       BucketName: !Sub 'spark-troubleshooting-demo-${AWS::AccountId}-${AWS::Region}'
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      # Modern AWS default: disable ACLs entirely; use bucket policy instead.
+      # BucketOwnerEnforced also satisfies cfn-guard's S3_BUCKET_NO_PUBLIC_RW_ACL.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Enable versioning so accidental overwrites are recoverable. The
+      # BucketCleanup Lambda already iterates list_object_versions and deletes
+      # both current versions and delete markers, so the cleanup on stack
+      # teardown still works with versioning enabled.
+      VersioningConfiguration:
+        Status: Enabled
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
@@ -489,6 +513,21 @@ Resources:
             Resource: '*'
 
   # EMR-on-EC2 read permissions (always-on)
+  #
+  # The statements below are split by ARN scope:
+  #  * EMREC2PerClusterRead — scoped to cluster ARNs in the current account
+  #    and region. Covers describe-style APIs and Persistent App UI APIs
+  #    that support resource-level permissions.
+  #  * EMREC2AccountWideList — restricted to two APIs that do not support
+  #    resource-level permissions per AWS documentation
+  #    (elasticmapreduce:ListClusters, elasticmapreduce:DescribeJobFlows).
+  #    These must use Resource: '*'.
+  #
+  # The former EMRClusterLogsFromS3 statement (s3:GetObject on Resource: '*')
+  # is intentionally omitted. The demo workload runs on EMR Serverless and
+  # does not require reading EMR-on-EC2 cluster logs from an arbitrary S3
+  # bucket. Customers extending this role for EMR-on-EC2 should add a
+  # statement scoped to their specific cluster-logs bucket ARN.
   EMRReadAccess:
     Type: AWS::IAM::Policy
     Properties:
@@ -497,27 +536,23 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: EMREC2DescribeAndList
+          - Sid: EMREC2PerClusterRead
             Effect: Allow
             Action:
               - 'elasticmapreduce:DescribeCluster'
               - 'elasticmapreduce:DescribeStep'
               - 'elasticmapreduce:ListSteps'
-              - 'elasticmapreduce:ListClusters'
-              - 'elasticmapreduce:DescribeJobFlows'
-            Resource: '*'
-          - Sid: EMRPersistentAppUI
-            Effect: Allow
-            Action:
               - 'elasticmapreduce:CreatePersistentAppUI'
               - 'elasticmapreduce:DescribePersistentAppUI'
               - 'elasticmapreduce:GetPersistentAppUIPresignedURL'
-            Resource: '*'
-          - Sid: EMRClusterLogsFromS3
+            Resource: !Sub 'arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:cluster/*'
+          - Sid: EMREC2AccountWideList
             Effect: Allow
             Action:
-              - 's3:GetObject'
-              - 's3:ListBucket'
+              - 'elasticmapreduce:ListClusters'
+              - 'elasticmapreduce:DescribeJobFlows'
+            # These APIs do not support resource-level permissions and
+            # require Resource: '*' per AWS documentation.
             Resource: '*'
 
   # EMR Serverless read permissions (always-on)
@@ -621,6 +656,15 @@ Resources:
 
   DemoExecutionRole:
     Type: AWS::IAM::Role
+    Metadata:
+      guard:
+        # cfn-guard IAM_NO_INLINE_POLICY_CHECK: prefer AWS::IAM::ManagedPolicy
+        # over inline policies. Inline is deliberately kept here so the demo
+        # template stays self-contained and the reader sees the role + its
+        # permissions in one place. Converting to a managed policy adds a
+        # separate resource with no functional benefit.
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK
     Properties:
       RoleName: EMRServerlessExecutionRole-AnalyticsEvents
       Description: Execution role assumed by the analytics-events-platform EMR Serverless application's Spark drivers and executors.
@@ -693,6 +737,17 @@ Resources:
 
   FailedJobsAlarm:
     Type: AWS::CloudWatch::Alarm
+    Metadata:
+      guard:
+        # cfn-guard CLOUDWATCH_ALARM_ACTION_CHECK: alarm has no
+        # AlarmActions / OKActions / InsufficientDataActions. This is
+        # intentional. The alarm serves as a *lookup handle*: the blog
+        # reader references it by name in the AWS DevOps Agent chat to
+        # trigger an investigation. Adding SNS topics or auto-remediation
+        # is out of scope for the demo and would provide no functional
+        # benefit for this use case.
+        SuppressedRules:
+          - CLOUDWATCH_ALARM_ACTION_CHECK
     Properties:
       AlarmName: !Sub '${DemoApplication}-FailedJobs'
       AlarmDescription: 'Fires when the analytics-events-platform EMR Serverless application has at least one failed job in a 60-second window. Used by the AWS DevOps Agent + Apache Spark Troubleshooting Agent for Amazon EMR integration blog post to trigger an investigation from the agent chat.'
