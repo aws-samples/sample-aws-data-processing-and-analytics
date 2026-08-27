@@ -1,0 +1,56 @@
+[project]
+name = "amazon-msk-diagnostic-mcp"
+version = "0.1.0"
+description = "A sample Model Context Protocol (MCP) server for read-only Amazon MSK broker-level diagnostics via the Kafka wire protocol."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT-0" }
+authors = [
+    { name = "Amazon Web Services" },
+]
+classifiers = [
+    "License :: OSI Approved :: MIT No Attribution License (MIT-0)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "loguru>=0.7.0",
+    "mcp[cli]>=1.23.0,<2.0.0",
+    "boto3>=1.35.0",
+    "confluent-kafka>=2.5.0",
+    "aws-msk-iam-sasl-signer-python>=1.0.0",
+]
+
+[project.scripts]
+"amazon-msk-diagnostic-mcp" = "amazon_msk_diagnostic_mcp.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.9.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amazon_msk_diagnostic_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint.isort]
+force-single-line = false
