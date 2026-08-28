@@ -27,6 +27,15 @@ import boto3
 
 def send_cfn_response(event, context, status, data, reason=None):
     """PUT a JSON response to the CloudFormation-provided pre-signed URL."""
+    response_url = event["ResponseURL"]
+    # CloudFormation always supplies an HTTPS pre-signed S3 URL for the
+    # response endpoint. Refuse any other scheme defensively — this both
+    # closes the theoretical file:/// or ftp:// class of misuse and
+    # documents the intent for security scanners.
+    if not response_url.startswith("https://"):
+        raise ValueError(
+            f"Refusing to send response to a non-HTTPS URL: {response_url!r}"
+        )
     body = json.dumps({
         "Status": status,
         "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
@@ -37,12 +46,14 @@ def send_cfn_response(event, context, status, data, reason=None):
         "Data": data,
     }).encode("utf-8")
     req = urllib.request.Request(
-        event["ResponseURL"],
+        response_url,
         data=body,
         method="PUT",
         headers={"Content-Type": ""},
     )
-    urllib.request.urlopen(req, timeout=10)
+    # response_url is validated to be https:// immediately above, and
+    # CloudFormation is the sole producer of this URL.
+    urllib.request.urlopen(req, timeout=10)  # nosec B310
 
 
 def empty_bucket(bucket_name):
