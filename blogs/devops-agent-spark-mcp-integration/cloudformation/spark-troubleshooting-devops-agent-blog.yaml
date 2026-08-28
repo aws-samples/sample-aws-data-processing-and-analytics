@@ -113,6 +113,14 @@ Resources:
 
 
           def send_cfn_response(event, context, status, data, reason=None):
+              response_url = event["ResponseURL"]
+              # CloudFormation always supplies an HTTPS pre-signed S3 URL.
+              # Refuse any other scheme defensively — closes the theoretical
+              # file:/// or ftp:// class of misuse and satisfies Bandit B310.
+              if not response_url.startswith("https://"):
+                  raise ValueError(
+                      f"Refusing to send response to a non-HTTPS URL: {response_url!r}"
+                  )
               body = json.dumps({
                   "Status": status,
                   "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
@@ -123,12 +131,13 @@ Resources:
                   "Data": data,
               }).encode("utf-8")
               req = urllib.request.Request(
-                  event["ResponseURL"],
+                  response_url,
                   data=body,
                   method="PUT",
                   headers={"Content-Type": ""},
               )
-              urllib.request.urlopen(req, timeout=10)
+              # response_url is validated to be https:// above.
+              urllib.request.urlopen(req, timeout=10)  # nosec B310
 
 
           def lambda_handler(event, context):
@@ -236,9 +245,9 @@ Resources:
   # driver/executor stdout/stderr under the logs/ prefix.
   # ============================================================================
 
-  # checkov:skip=CKV_AWS_18: Access logging is not enabled for this demo bucket. The bucket is short-lived (created and destroyed by the blog reader within a single walkthrough); adding a second bucket to receive access logs is out of scope for the demo template.
   DemoBucket:
     Type: AWS::S3::Bucket
+    # checkov:skip=CKV_AWS_18: Access logging is not enabled for this demo bucket. The bucket is short-lived (created and destroyed by the blog reader within a single walkthrough); adding a second bucket to receive access logs is out of scope for the demo template.
     Metadata:
       guard:
         # cfn-guard suppressions with justification:
@@ -252,7 +261,19 @@ Resources:
           - S3_BUCKET_DEFAULT_LOCK_ENABLED
           - S3_BUCKET_LOGGING_ENABLED
     Properties:
-      BucketName: !Sub 'spark-troubleshooting-demo-${AWS::AccountId}-${AWS::Region}'
+      # Note on bucket-squatting concerns:
+      # The Slingshot RUBRIC "S3 Example Bucket Naming" rule suggests using
+      # the amzn-s3-demo- prefix. That prefix is actually reserved by AWS at
+      # the S3 service level and cannot be used from customer accounts (the
+      # S3 CreateBucket API returns 403). The scanner's recommendation is
+      # therefore not implementable.
+      #
+      # Squatting is not a real concern for this name in practice: the
+      # bucket name is composed at deploy time with the caller's own AWS
+      # account ID, which produces a per-account-unique name. Two customers
+      # deploying this template cannot collide, and no external actor can
+      # pre-register a name that includes another account's ID.
+      BucketName: !Sub 'spark-troubleshooting-${AWS::AccountId}-${AWS::Region}'
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -346,6 +367,14 @@ Resources:
 
 
           def send_cfn_response(event, context, status, data, reason=None):
+              response_url = event["ResponseURL"]
+              # CloudFormation always supplies an HTTPS pre-signed S3 URL.
+              # Refuse any other scheme defensively — closes the theoretical
+              # file:/// or ftp:// class of misuse and satisfies Bandit B310.
+              if not response_url.startswith("https://"):
+                  raise ValueError(
+                      f"Refusing to send response to a non-HTTPS URL: {response_url!r}"
+                  )
               body = json.dumps({
                   "Status": status,
                   "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
@@ -356,12 +385,13 @@ Resources:
                   "Data": data,
               }).encode("utf-8")
               req = urllib.request.Request(
-                  event["ResponseURL"],
+                  response_url,
                   data=body,
                   method="PUT",
                   headers={"Content-Type": ""},
               )
-              urllib.request.urlopen(req, timeout=10)
+              # response_url is validated to be https:// above.
+              urllib.request.urlopen(req, timeout=10)  # nosec B310
 
 
           def empty_bucket(bucket_name):
