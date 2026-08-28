@@ -72,6 +72,16 @@ Resources:
 
   SMUSAzDiscoveryLambdaRole:
     Type: AWS::IAM::Role
+    Metadata:
+      guard:
+        # cfn-guard suppression with justification:
+        # - IAM_NO_INLINE_POLICY_CHECK: This role is single-purpose (owned by
+        #   the SMUSAzDiscoveryFunction custom-resource Lambda). Inline
+        #   Policies keep the permission grant co-located with the role for
+        #   readability and prevent the policy from being reused by
+        #   unintended principals.
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -96,11 +106,31 @@ Resources:
 
   SMUSAzDiscoveryFunction:
     Type: AWS::Lambda::Function
+    Metadata:
+      guard:
+        # cfn-guard suppressions with justification:
+        # - LAMBDA_DLQ_CHECK: This is a CloudFormation custom-resource
+        #   Lambda. CFN invokes it synchronously via a pre-signed
+        #   ResponseURL; DLQs only apply to asynchronous invocations, so
+        #   configuring one would have no effect.
+        # - LAMBDA_INSIDE_VPC: This Lambda runs BEFORE the DemoVPC exists;
+        #   its own output determines which AZs the VPC subnets are placed
+        #   in. Attaching it to a VPC is a bootstrapping impossibility. It
+        #   only calls ec2:DescribeVpcEndpointServices via the regional EC2
+        #   endpoint.
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK
+          - LAMBDA_INSIDE_VPC
     Properties:
       Description: Returns two Availability Zones that support the SageMaker Unified Studio MCP endpoint service in this account.
       Runtime: python3.12
       Handler: index.lambda_handler
       Timeout: 30
+      # Throttle to a single concurrent execution. This Lambda fires once
+      # per stack Create/Update/Delete as a CloudFormation custom resource;
+      # a hard concurrency cap of 1 is enough and also satisfies the
+      # LAMBDA_CONCURRENCY_CHECK rule.
+      ReservedConcurrentExecutions: 1
       Role: !GetAtt SMUSAzDiscoveryLambdaRole.Arn
       Code:
         ZipFile: |
@@ -257,9 +287,16 @@ Resources:
         # - S3_BUCKET_LOGGING_ENABLED: Access logging requires a second S3
         #   bucket to receive logs, which is out of scope for the short-lived
         #   demo bucket. Same rationale as the Checkov CKV_AWS_18 skip above.
+        # - S3_BUCKET_NO_PUBLIC_RW_ACL: This rule looks for an explicit
+        #   AccessControl property. We disable ACLs entirely via
+        #   OwnershipControls.ObjectOwnership: BucketOwnerEnforced (stronger
+        #   than setting AccessControl: Private), and additionally block all
+        #   public access via PublicAccessBlockConfiguration. Public
+        #   read/write is impossible on this bucket.
         SuppressedRules:
           - S3_BUCKET_DEFAULT_LOCK_ENABLED
           - S3_BUCKET_LOGGING_ENABLED
+          - S3_BUCKET_NO_PUBLIC_RW_ACL
     Properties:
       # Note on bucket-squatting concerns:
       # The Slingshot RUBRIC "S3 Example Bucket Naming" rule suggests using
@@ -319,6 +356,16 @@ Resources:
 
   BucketCleanupLambdaRole:
     Type: AWS::IAM::Role
+    Metadata:
+      guard:
+        # cfn-guard suppression with justification:
+        # - IAM_NO_INLINE_POLICY_CHECK: This role is single-purpose (owned
+        #   by the BucketCleanupFunction custom-resource Lambda). Inline
+        #   Policies keep the permission grant co-located with the role for
+        #   readability and prevent the policy from being reused by
+        #   unintended principals.
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -350,11 +397,33 @@ Resources:
 
   BucketCleanupFunction:
     Type: AWS::Lambda::Function
+    Metadata:
+      guard:
+        # cfn-guard suppressions with justification:
+        # - LAMBDA_DLQ_CHECK: This is a CloudFormation custom-resource
+        #   Lambda. CFN invokes it synchronously via a pre-signed
+        #   ResponseURL; DLQs only apply to asynchronous invocations, so
+        #   configuring one would have no effect.
+        # - LAMBDA_INSIDE_VPC: This Lambda talks to the regional Amazon S3
+        #   endpoint to empty the demo bucket at stack delete. Attaching
+        #   it to a VPC would require adding an S3 gateway endpoint to
+        #   the VPC purely to support the cleanup Lambda — out of scope
+        #   for a blog demo template. Since the Lambda only runs during
+        #   stack Delete and holds no long-lived state, keeping it outside
+        #   the VPC is the pragmatic choice.
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK
+          - LAMBDA_INSIDE_VPC
     Properties:
       Description: Empties the demo S3 bucket on stack delete so CloudFormation can then delete the bucket itself.
       Runtime: python3.12
       Handler: index.lambda_handler
       Timeout: 300
+      # Throttle to a single concurrent execution. This Lambda fires once
+      # per stack Create/Update/Delete as a CloudFormation custom resource;
+      # a hard concurrency cap of 1 is enough and also satisfies the
+      # LAMBDA_CONCURRENCY_CHECK rule.
+      ReservedConcurrentExecutions: 1
       Role: !GetAtt BucketCleanupLambdaRole.Arn
       Code:
         ZipFile: |
