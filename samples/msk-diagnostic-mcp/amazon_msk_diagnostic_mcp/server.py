@@ -43,6 +43,16 @@ from mcp.server.fastmcp import FastMCP
 # Consulted before any tool that returns message payloads runs.
 _ALLOW_SENSITIVE_DATA_ACCESS = False
 
+# Cluster-ARN allowlist. When set to a non-wildcard value, every tool call
+# is rejected unless its cluster_arn is in this set. Defense-in-depth on top
+# of the Lambda's IAM policy; also useful for local dev via env var.
+#
+# Value semantics:
+#   None or {'*'}  -> allow any cluster (default; refused for prod deploys
+#                     via the CloudFormation Rules block).
+#   {arn1, arn2}   -> only these specific ARNs are allowed.
+_ALLOWED_CLUSTER_ARNS: set | None = None
+
 
 def _sensitive_check(tool_name: str) -> None:
     if not _ALLOW_SENSITIVE_DATA_ACCESS:
@@ -51,6 +61,17 @@ def _sensitive_check(tool_name: str) -> None:
             f'which may contain sensitive data. Restart the server with '
             f'--allow-sensitive-data-access=true or set env var '
             f'MSK_MCP_ALLOW_SENSITIVE_DATA_ACCESS=true to enable.'
+        )
+
+
+def _allowlist_check(cluster_arn: str) -> None:
+    """Reject cluster ARNs not in the configured allowlist (if any)."""
+    if _ALLOWED_CLUSTER_ARNS is None or '*' in _ALLOWED_CLUSTER_ARNS:
+        return
+    if cluster_arn not in _ALLOWED_CLUSTER_ARNS:
+        raise ValueError(
+            f'cluster_arn {cluster_arn!r} is not in the server-side allowlist. '
+            f'Allowed: {sorted(_ALLOWED_CLUSTER_ARNS)}'
         )
 
 
@@ -83,16 +104,33 @@ def _region_from_arn(cluster_arn: str) -> str:
 
 
 def _get_bootstrap_brokers(cluster_arn: str, region: str) -> str:
-    """Resolve cluster_arn to a bootstrap broker string via the MSK control-plane API.
+    """Resolve cluster_arn to a bootstrap broker string.
 
-    Handles both provisioned and serverless clusters. Prefers the public IAM SASL
-    endpoint when available (usable from outside the VPC), falling back to the
-    private endpoint (usable from inside the VPC / VPN / bastion).
+    Normally calls the MSK control-plane API (kafka:GetBootstrapBrokers).
+    On Lambda-in-VPC without a NAT gateway that call hangs because the
+    AWS API endpoint is public-only. As an escape hatch, an env var
+    `MSK_MCP_BOOTSTRAP_OVERRIDES` may map ARNs to broker strings, or a
+    single `MSK_MCP_BOOTSTRAP_OVERRIDE` provides a global fallback. This
+    is intended for locked-down VPC environments where operators know
+    their broker strings.
+
+    Prefers the private IAM SASL endpoint (usable from inside the VPC),
+    falling back to the public endpoint.
     """
+    override_map = os.environ.get('MSK_MCP_BOOTSTRAP_OVERRIDES', '')
+    for pair in override_map.split(';'):
+        if '=' in pair:
+            arn, brokers = pair.split('=', 1)
+            if arn.strip() == cluster_arn:
+                return brokers.strip()
+    global_override = os.environ.get('MSK_MCP_BOOTSTRAP_OVERRIDE')
+    if global_override:
+        return global_override
+
     client = boto3.client('kafka', region_name=region)
     resp = client.get_bootstrap_brokers(ClusterArn=cluster_arn)
-    brokers = resp.get('BootstrapBrokerStringPublicSaslIam') or resp.get(
-        'BootstrapBrokerStringSaslIam'
+    brokers = resp.get('BootstrapBrokerStringSaslIam') or resp.get(
+        'BootstrapBrokerStringPublicSaslIam'
     )
     if not brokers:
         raise RuntimeError(
@@ -109,6 +147,7 @@ def _oauth_cb(oauth_config, region: str):
 
 
 def _admin_client_for(cluster_arn: str) -> AdminClient:
+    _allowlist_check(cluster_arn)
     region = _region_from_arn(cluster_arn)
     brokers = _get_bootstrap_brokers(cluster_arn, region)
     return AdminClient(
@@ -1086,9 +1125,22 @@ async def read_topic_data(
     }
 
 
+def _parse_cluster_allowlist(raw: str) -> set | None:
+    """Parse MSK_MCP_ALLOWED_CLUSTER_ARNS env var / CLI arg into a set.
+
+    - Empty/None -> None (no allowlist)
+    - '*' -> {'*'} (wildcard)
+    - 'arn1,arn2' -> {'arn1', 'arn2'}
+    """
+    if not raw:
+        return None
+    arns = {p.strip() for p in raw.split(',') if p.strip()}
+    return arns or None
+
+
 def main():
     """Run the MCP server."""
-    global _ALLOW_SENSITIVE_DATA_ACCESS
+    global _ALLOW_SENSITIVE_DATA_ACCESS, _ALLOWED_CLUSTER_ARNS
 
     parser = argparse.ArgumentParser(
         prog='amazon-msk-diagnostic-mcp',
@@ -1102,6 +1154,12 @@ def main():
         help='Enable tools that return message payloads (read_topic_data). '
         'Off by default. Same effect as MSK_MCP_ALLOW_SENSITIVE_DATA_ACCESS=true.',
     )
+    parser.add_argument(
+        '--allowed-cluster-arns',
+        default=None,
+        help='Comma-separated allowlist of MSK cluster ARNs. "*" allows any. '
+        'Same effect as MSK_MCP_ALLOWED_CLUSTER_ARNS=<value>.',
+    )
     args = parser.parse_args()
 
     env_flag = os.environ.get('MSK_MCP_ALLOW_SENSITIVE_DATA_ACCESS', '').lower()
@@ -1112,8 +1170,15 @@ def main():
         'yes',
     )
 
+    allowlist_raw = args.allowed_cluster_arns or os.environ.get(
+        'MSK_MCP_ALLOWED_CLUSTER_ARNS', ''
+    )
+    _ALLOWED_CLUSTER_ARNS = _parse_cluster_allowlist(allowlist_raw)
+
     logger.info(
-        f'Starting amazon-msk-diagnostic-mcp (sensitive_data_access={_ALLOW_SENSITIVE_DATA_ACCESS})'
+        f'Starting amazon-msk-diagnostic-mcp '
+        f'(sensitive_data_access={_ALLOW_SENSITIVE_DATA_ACCESS}, '
+        f'allowed_cluster_arns={_ALLOWED_CLUSTER_ARNS})'
     )
     mcp.run()
 
