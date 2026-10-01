@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MSK Diagnostic MCP Server for AWS DevOps Agent.
+
+  A single VPC-attached Lambda exposes 8 read-only Kafka broker-level
+  diagnostic tools over Streamable HTTP (via Lambda Web Adapter + a Function
+  URL with AWS_IAM / SigV4 auth). The Lambda speaks the Kafka wire protocol
+  directly to MSK brokers on port 9098 using IAM SASL/OAUTHBEARER.
+
+  Multi-cluster by design — the caller passes a cluster_arn per tool call;
+  an application-level allowlist (AllowedClusterArns) plus the Lambda's
+  VpcConfig together bound what the server can reach.
+
+  Register the resulting Function URL with AWS DevOps Agent as a Private
+  Connection (Service Name = lambda). The agent signs requests with SigV4.
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    MemorySize: 1024
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name for resource naming and prod safety rules.
+
+  AllowedClusterArns:
+    Type: String
+    Default: '*'
+    Description: >
+      Comma-separated list of MSK cluster ARNs the server may inspect. Use
+      '*' for dev only — the Rules block below refuses '*' when
+      StageName=prod. In prod, list the exact cluster ARNs. Only clusters
+      reachable from the Lambda's VpcConfig will actually work, regardless
+      of what's in this list.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      VPC to attach the Lambda to. Must be a VPC that can reach the target
+      MSK cluster(s) on port 9098 — typically the same VPC as the cluster,
+      or a peered VPC.
+
+  VpcSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      Subnets in VpcId that the Lambda will run in. Must have a route to
+      the MSK brokers on 9098. Typically the same private subnets as the
+      MSK cluster.
+
+  MskClusterSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. If provided, this template adds an ingress rule to the MSK
+      cluster's security group allowing traffic on 9098 from the Lambda's
+      security group. Leave empty if you manage that ingress rule yourself.
+
+  AllowSensitiveDataAccess:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      When 'true', enables the read_topic_data tool that returns Kafka
+      message payloads. Off by default because payloads may contain
+      sensitive data.
+
+  BootstrapOverrides:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. Semicolon-separated 'cluster_arn=broker_string' pairs.
+      When set, the server skips the kafka:GetBootstrapBrokers API call
+      for those ARNs. Useful when the Lambda's subnets have no NAT and
+      cannot reach the public MSK control-plane endpoint. In production,
+      prefer giving the Lambda's subnets a NAT gateway route so
+      GetBootstrapBrokers works normally.
+
+Conditions:
+  HasMskClusterSg: !Not [!Equals [!Ref MskClusterSecurityGroupId, '']]
+
+Rules:
+  ProdRequiresExplicitClusterList:
+    RuleCondition: !Equals [!Ref StageName, prod]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AllowedClusterArns, '*']]
+        AssertDescription: >
+          When StageName is 'prod', AllowedClusterArns must be an explicit
+          comma-separated list of cluster ARNs, not '*'. Wildcard cluster
+          access is only permitted for dev/staging.
+
+Resources:
+  # ============================================================
+  # Auto-created security group for the Lambda
+  # ============================================================
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub Egress for msk-diagnostic-mcp-${StageName} to MSK brokers + AWS APIs
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 9098
+          ToPort: 9098
+          CidrIp: 0.0.0.0/0
+          Description: MSK IAM SASL broker port
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AWS APIs (kafka:GetBootstrapBrokers, STS, etc.)
+
+  # Optional: allow our Lambda's SG to reach the MSK cluster's SG on 9098.
+  # Only created when MskClusterSecurityGroupId is provided.
+  MskClusterIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasMskClusterSg
+    Properties:
+      GroupId: !Ref MskClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 9098
+      ToPort: 9098
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: !Sub Ingress from msk-diagnostic-mcp-${StageName} Lambda
+
+  # ============================================================
+  # Dependencies layer — bundled deps + the sibling
+  # amazon_msk_diagnostic_mcp package
+  # ============================================================
+  DependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub msk-diagnostic-mcp-deps-${StageName}
+      Description: Runtime dependencies + amazon_msk_diagnostic_mcp package
+      ContentUri: layers/dependencies/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: makefile
+
+  # ============================================================
+  # Lambda function with Lambda Web Adapter (Streamable HTTP)
+  # ============================================================
+  MskDiagnosticMCPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub msk-diagnostic-mcp-${StageName}
+      Handler: run.sh
+      CodeUri: src/
+      Description: MSK Diagnostic MCP Server — Streamable HTTP via Lambda Web Adapter
+      Architectures:
+        - x86_64
+      Layers:
+        # Lambda Web Adapter layer (public AWS layer, x86_64)
+        - !Sub arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:24
+        - !Ref DependenciesLayer
+      Environment:
+        Variables:
+          # Lambda Web Adapter config
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_PORT: "8000"
+          AWS_LWA_READINESS_CHECK_PATH: /mcp
+          AWS_LWA_READINESS_CHECK_MIN_UNHEALTHY_STATUS: 500
+          AWS_LWA_INVOKE_MODE: response_stream
+          AWS_LWA_READINESS_CHECK_PROTOCOL: http
+          AWS_LWA_ASYNC_INIT: "true"
+          # MCP server config
+          PYTHONPATH: /opt/python
+          STAGE_NAME: !Ref StageName
+          MSK_MCP_ALLOWED_CLUSTER_ARNS: !Ref AllowedClusterArns
+          MSK_MCP_ALLOW_SENSITIVE_DATA_ACCESS: !Ref AllowSensitiveDataAccess
+          MSK_MCP_BOOTSTRAP_OVERRIDES: !Ref BootstrapOverrides
+      VpcConfig:
+        SubnetIds: !Ref VpcSubnetIds
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Policies:
+        # Data-plane (Kafka wire) permissions — wildcarded to Kafka
+        # resources in the account. Application-level allowlist enforced
+        # via MSK_MCP_ALLOWED_CLUSTER_ARNS env var provides defense-in-
+        # depth; the caller's own IAM is still the primary authorization
+        # boundary.
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - kafka-cluster:Connect
+                - kafka-cluster:DescribeCluster
+                - kafka-cluster:DescribeClusterDynamicConfiguration
+                - kafka-cluster:DescribeTopic
+                - kafka-cluster:DescribeTopicDynamicConfiguration
+                - kafka-cluster:ReadData
+                - kafka-cluster:DescribeGroup
+                - kafka-cluster:AlterGroup
+              Resource: !Sub arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:*
+            # Control-plane read needed by _get_bootstrap_brokers().
+            - Effect: Allow
+              Action:
+                - kafka:GetBootstrapBrokers
+                - kafka:DescribeCluster
+                - kafka:DescribeClusterV2
+              Resource: !Sub arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:cluster/*/*
+      # Function URL with RESPONSE_STREAM for streamable-HTTP support.
+      # AWS_IAM auth == callers (DevOps Agent) sign requests with SigV4.
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        InvokeMode: RESPONSE_STREAM
+
+Outputs:
+  FunctionUrl:
+    Description: >
+      Function URL to register with AWS DevOps Agent as a Private Connection.
+      Service Name = lambda. Callers must sign with SigV4.
+    Value: !GetAtt MskDiagnosticMCPFunctionUrl.FunctionUrl
+
+  FunctionArn:
+    Description: Lambda function ARN.
+    Value: !GetAtt MskDiagnosticMCPFunction.Arn
+
+  FunctionRoleArn:
+    Description: Lambda execution role ARN.
+    Value: !GetAtt MskDiagnosticMCPFunctionRole.Arn
+
+  LambdaSecurityGroupId:
+    Description: >
+      Auto-created security group attached to the Lambda. Add this SG as an
+      ingress source (port 9098) on your MSK cluster's security group if
+      you did not pass MskClusterSecurityGroupId to this stack.
+    Value: !Ref LambdaSecurityGroup

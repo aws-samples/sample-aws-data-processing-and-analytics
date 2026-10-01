@@ -1,0 +1,6 @@
+.aws-sam/
+samconfig.toml
+
+# Staged sibling package copied by deploy.sh at build time (removed on exit;
+# ignore so a mid-build interruption doesn't accidentally commit a duplicate)
+layers/dependencies/amazon_msk_diagnostic_mcp/
