@@ -1,0 +1,5 @@
+aws-cdk-lib>=2.274.0,<3.0.0
+constructs>=10.4.2,<11.0.0
+# cdk-nag 3.x moves suppressions onto CDK's experimental Validations API, so
+# this sample stays on the stable 2.x line (NagSuppressions).
+cdk-nag>=2.38.2,<3.0.0

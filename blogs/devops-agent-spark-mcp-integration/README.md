@@ -115,6 +115,7 @@ No manual `aws s3 rm` is required — a Lambda-backed custom resource empties th
 ```
 blogs/devops-agent-spark-mcp-integration/
 ├── README.md
+├── cdk/
 ├── cloudformation/
 │   └── spark-troubleshooting-devops-agent-blog.yaml
 ├── scripts/
@@ -128,6 +129,7 @@ blogs/devops-agent-spark-mcp-integration/
 
 | Directory | Contents |
 |-----------|----------|
+| `cdk/` | AWS CDK (Python) alternative to the CloudFormation template. To deploy with the AWS CDK instead of CloudFormation, see [cdk/README.md](cdk/README.md) |
 | `cloudformation/` | CloudFormation template for the full demo infrastructure |
 | `scripts/` | `customer_events_aggregator.py` is the deliberately-failing PySpark script the demo runs. `az_discovery.py` and `bucket_cleanup.py` are readable source-of-truth copies of the two custom-resource Lambdas whose code is embedded inline in the CloudFormation template (`ZipFile`). The customer does not upload these two files anywhere; they exist only for humans reading the repo. |
 | `data/` | Sample customer events Parquet data |
