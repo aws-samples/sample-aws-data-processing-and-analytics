@@ -7,6 +7,8 @@
 - A CDK-supported Node.js release and AWS CDK CLI v2.1146.1 or later
 - `uv`
 - Permissions to deploy the resources described in `docs/security.md`
+- Lake Formation data-lake administrator access, or permission to grant access on the sample's
+  S3 Tables child catalog. IAM `AdministratorAccess` alone does not grant Lake Formation access.
 - A tool-capable Amazon Bedrock model enabled in the deployment Region
 - A Region where S3 Tables, Glue 5.1, Athena, Step Functions, and Bedrock are available
 
@@ -44,12 +46,21 @@ Region and account.
 make deploy STAGE=dev AWS_REGION=us-east-1
 ```
 
-The command packages Linux-compatible Lambda dependencies, deploys `abdr-dev`, and then checks the
-shared regional `s3tablescatalog`. If it is absent, the helper creates it using the current AWS
-analytics integration shape. It never changes or deletes a pre-existing integration.
+The command packages Linux-compatible Lambda dependencies, deploys `abdr-dev`, checks the shared
+regional `s3tablescatalog`, and grants the deployed Glue and validation roles access only to the
+sample's child catalog, namespace, and table. If the shared catalog is absent, the helper creates it
+using the current AWS analytics integration shape. It never changes or deletes a pre-existing
+integration.
 
 The operator needs `glue:CreateCatalog` and `glue:PassConnection` only when the shared integration is
 missing. Review the generated CloudFormation change set when CDK requests approval.
+The post-deployment grant step requires a Lake Formation data-lake administrator (or a principal
+with grantable permissions on the child catalog). Have the account's Lake Formation administrator
+run the following if deployment and data-governance duties are separated:
+
+```bash
+./scripts/grant_lake_formation_permissions.sh dev us-east-1
+```
 
 ## Outputs
 

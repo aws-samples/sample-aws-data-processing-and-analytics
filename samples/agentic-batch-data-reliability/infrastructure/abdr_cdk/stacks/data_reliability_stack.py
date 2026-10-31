@@ -429,6 +429,7 @@ class DataReliabilityStack(Stack):
                     "glue:GetDatabase",
                     "glue:GetTable",
                     "glue:GetPartitions",
+                    "lakeformation:GetDataAccess",
                     "s3tables:GetTableBucket",
                     "s3tables:GetNamespace",
                     "s3tables:GetTable",
@@ -638,6 +639,9 @@ class DataReliabilityStack(Stack):
         CfnOutput(self, "TableBucketName", value=table_bucket_name)
         CfnOutput(self, "OrdersJobName", value=orders_job.ref)
         CfnOutput(self, "RecoveryJobName", value=recovery_job.ref)
+        CfnOutput(self, "OrdersEtlRoleArn", value=glue_role.role_arn)
+        if validation_function.role is not None:
+            CfnOutput(self, "ValidationRoleArn", value=validation_function.role.role_arn)
         CfnOutput(self, "StateMachineArn", value=state_machine.state_machine_arn)
         CfnOutput(
             self,

@@ -28,4 +28,5 @@ export ABDR_LAMBDA_ASSET="${PROJECT_DIR}/.build/lambda"
 )
 
 "${PROJECT_DIR}/scripts/enable_s3_tables_integration.sh" "${REGION}"
+"${PROJECT_DIR}/scripts/grant_lake_formation_permissions.sh" "${STAGE}" "${REGION}"
 echo "Deployment complete. The regional s3tablescatalog is shared and will not be deleted."
