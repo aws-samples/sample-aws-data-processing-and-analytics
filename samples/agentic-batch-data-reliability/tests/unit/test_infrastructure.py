@@ -86,7 +86,10 @@ def test_bedrock_permission_uses_parameterized_exact_resource():
                                     "bedrock:InvokeModel",
                                     "bedrock:InvokeModelWithResponseStream",
                                 ],
-                                "Resource": {"Ref": "BedrockModelArn"},
+                                "Resource": [
+                                    {"Ref": "BedrockModelArn"},
+                                    {"Ref": "BedrockFoundationModelArn"},
+                                ],
                             }
                         )
                     ]
