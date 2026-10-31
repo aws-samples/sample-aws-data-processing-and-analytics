@@ -385,7 +385,6 @@ class DataReliabilityStack(Stack):
                 ),
                 timeout=timeout or Duration.minutes(2),
                 memory_size=memory_size,
-                reserved_concurrent_executions=2,
                 environment=environment,
                 log_group=log_group,
                 tracing=lambda_.Tracing.ACTIVE,

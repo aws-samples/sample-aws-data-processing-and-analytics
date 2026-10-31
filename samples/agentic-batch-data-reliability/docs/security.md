@@ -22,7 +22,10 @@
   scoping. Wildcards are limited to read operations and documented in the stack.
 - Bedrock invocation is scoped to the exact ARN supplied at deployment.
 - Step Functions logs exclude execution data so task tokens and report content are not copied to logs.
-- Lambda reserved concurrency and bounded agent turns constrain accidental cost and request fan-out.
+- Bounded Step Functions retries, Lambda timeouts, Athena scan limits, and agent turn/token limits
+  constrain accidental cost and request fan-out. The sample does not reserve Lambda concurrency so it
+  remains deployable in accounts with the default low concurrency quota; production deployments can
+  add reservations after checking the account's required unreserved pool.
 
 ## Prompt injection
 

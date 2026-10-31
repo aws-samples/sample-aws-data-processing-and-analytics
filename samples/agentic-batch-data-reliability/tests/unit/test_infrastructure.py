@@ -61,6 +61,18 @@ def test_raw_table_uses_injected_partition_projection_for_batch_scans():
     )
 
 
+def test_lambda_functions_do_not_require_account_concurrency_reservations():
+    functions = template().find_resources(
+        "AWS::Lambda::Function", {"Properties": {"Runtime": "python3.14"}}
+    )
+
+    assert len(functions) == 5
+    assert all(
+        "ReservedConcurrentExecutions" not in resource["Properties"]
+        for resource in functions.values()
+    )
+
+
 def test_bedrock_permission_uses_parameterized_exact_resource():
     template().has_resource_properties(
         "AWS::IAM::Policy",
