@@ -1,0 +1,7 @@
+{
+  "scenario_id": "duplicate_records",
+  "description": "Duplicate a deterministic subset while the Glue job succeeds.",
+  "expected_validation_status": "FAIL",
+  "expected_failed_rules": ["row_count_match", "duplicate_business_keys"],
+  "investigation_expected": true
+}

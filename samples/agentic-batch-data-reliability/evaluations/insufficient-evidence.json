@@ -1,0 +1,11 @@
+{
+  "batch_id": "batch-unknown-001",
+  "case_id": "insufficient-evidence-calibration",
+  "expected_hypothesis_terms": [],
+  "expected_recovery_strategy": "replace_affected_batch",
+  "insufficient_evidence_expected": true,
+  "required_evidence_sources": [
+    "reconciliation"
+  ],
+  "scenario": "unknown"
+}

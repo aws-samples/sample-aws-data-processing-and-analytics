@@ -1,0 +1,7 @@
+{
+  "scenario_id": "missing_records",
+  "description": "Silently filter a deterministic subset while the Glue job succeeds.",
+  "expected_validation_status": "FAIL",
+  "expected_failed_rules": ["row_count_match", "missing_business_keys"],
+  "investigation_expected": true
+}

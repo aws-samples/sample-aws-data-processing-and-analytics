@@ -1,0 +1,14 @@
+{
+  "batch_id": "batch-missing-001",
+  "case_id": "missing-records-grounded",
+  "expected_hypothesis_terms": [
+    "filter"
+  ],
+  "expected_recovery_strategy": "replace_affected_batch",
+  "insufficient_evidence_expected": false,
+  "required_evidence_sources": [
+    "reconciliation",
+    "glue"
+  ],
+  "scenario": "missing_records"
+}

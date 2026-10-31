@@ -22,7 +22,10 @@ This repository is organized into three categories:
 
 ### Samples
 
-_Coming soon_ — standalone examples covering common data processing patterns.
+| Name | Services | Description |
+|------|----------|-------------|
+| [AWS Data Reliability Copilot](samples/agentic-batch-data-reliability/) | Amazon S3 Tables, AWS Glue, Athena, Step Functions, EventBridge, Bedrock | Deterministic batch reconciliation, evidence-grounded investigation, and human-approved selective recovery |
+| [Amazon MSK Diagnostic MCP](samples/msk-diagnostic-mcp/) | Amazon MSK, Lambda, MCP | Read-only broker-level diagnostics over the Kafka wire protocol |
 
 ### Workshops
 
