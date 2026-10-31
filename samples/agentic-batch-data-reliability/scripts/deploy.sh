@@ -12,9 +12,8 @@ if [[ ! "${STAGE}" =~ ^(dev|test|prod)$ ]]; then
   echo "Stage must be dev, test, or prod" >&2
   exit 2
 fi
-if [[ ! -d "${PROJECT_DIR}/.build/lambda" ]]; then
-  "${PROJECT_DIR}/scripts/package_agent.sh"
-fi
+# Always rebuild so source or dependency changes cannot deploy a stale Lambda artifact.
+"${PROJECT_DIR}/scripts/package_agent.sh"
 
 export STAGE
 export ABDR_LAMBDA_ASSET="${PROJECT_DIR}/.build/lambda"

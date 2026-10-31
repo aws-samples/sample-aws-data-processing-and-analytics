@@ -1,11 +1,45 @@
+from unittest.mock import MagicMock
+
 import pytest
 
 from agentic_batch_data_reliability.reliability.reconciliation.athena import (
+    AthenaQueryRunner,
     TableReference,
     build_reconciliation_queries,
     quote_identifier,
     quote_literal,
 )
+
+
+def test_query_runner_respects_athena_max_results_limit():
+    client = MagicMock()
+    client.start_query_execution.return_value = {"QueryExecutionId": "query-1"}
+    client.get_query_execution.return_value = {
+        "QueryExecution": {
+            "Status": {"State": "SUCCEEDED"},
+            "Statistics": {"DataScannedInBytes": 42},
+        }
+    }
+    client.get_query_results.return_value = {
+        "ResultSet": {
+            "Rows": [
+                {"Data": [{"VarCharValue": "value"}]},
+                {"Data": [{"VarCharValue": "1"}]},
+            ]
+        }
+    }
+
+    result = AthenaQueryRunner(
+        client,
+        workgroup="test-workgroup",
+        output_location="s3://test-results/",
+        poll_seconds=0,
+    ).run("SELECT 1", catalog="AwsDataCatalog", database="default")
+
+    assert result.rows == [["1"]]
+    client.get_query_results.assert_called_once_with(
+        QueryExecutionId="query-1", MaxResults=1000
+    )
 
 
 def test_queries_are_batch_scoped_and_key_level():

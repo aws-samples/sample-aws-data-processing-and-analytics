@@ -146,7 +146,7 @@ class AthenaQueryRunner:
             execution = self.client.get_query_execution(QueryExecutionId=query_id)["QueryExecution"]
             status = execution["Status"]["State"]
             if status == "SUCCEEDED":
-                response = self.client.get_query_results(QueryExecutionId=query_id, MaxResults=1001)
+                response = self.client.get_query_results(QueryExecutionId=query_id, MaxResults=1000)
                 raw_rows = response["ResultSet"]["Rows"][1:]
                 rows = [
                     [column.get("VarCharValue") for column in row.get("Data", [])]

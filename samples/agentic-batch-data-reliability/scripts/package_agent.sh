@@ -14,4 +14,7 @@ uv pip install \
   -r "${PROJECT_DIR}/requirements.txt"
 cp -R "${PROJECT_DIR}/agentic_batch_data_reliability" "${BUILD_DIR}/"
 
+PYTHONPATH="${BUILD_DIR}" uv run --project "${PROJECT_DIR}" python -c \
+  "import boto3, botocore.docs; import agentic_batch_data_reliability"
+
 echo "Packaged Lambda dependencies at ${BUILD_DIR}"
