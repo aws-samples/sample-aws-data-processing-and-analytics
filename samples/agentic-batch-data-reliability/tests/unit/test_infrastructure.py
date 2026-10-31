@@ -118,6 +118,43 @@ def test_validation_role_can_request_lake_formation_data_access():
     )
 
 
+def test_validation_role_can_read_raw_orders_for_athena_queries():
+    template().has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": Match.array_with(
+                    [
+                        Match.object_like(
+                            {
+                                "Action": Match.array_with(["s3:GetObject*"]),
+                                "Resource": Match.array_with(
+                                    [
+                                        {
+                                            "Fn::Join": [
+                                                "",
+                                                [
+                                                    {
+                                                        "Fn::GetAtt": [
+                                                            "RawDataBucket57F26C03",
+                                                            "Arn",
+                                                        ]
+                                                    },
+                                                    "/raw/orders/*",
+                                                ],
+                                            ]
+                                        }
+                                    ]
+                                ),
+                            }
+                        )
+                    ]
+                )
+            }
+        },
+    )
+
+
 def test_stack_has_no_unsuppressed_aws_solutions_errors():
     app = cdk.App()
     stack = DataReliabilityStack(app, "abdr-nag-test", stage="test")

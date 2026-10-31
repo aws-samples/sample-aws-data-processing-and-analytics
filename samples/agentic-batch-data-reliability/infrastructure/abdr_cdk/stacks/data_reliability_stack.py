@@ -414,6 +414,7 @@ class DataReliabilityStack(Stack):
             },
         )
         raw_bucket.grant_read(validation_function, "manifests/*")
+        raw_bucket.grant_read(validation_function, "raw/orders/*")
         report_bucket.grant_read_write(validation_function)
         validation_function.add_to_role_policy(
             iam.PolicyStatement(
