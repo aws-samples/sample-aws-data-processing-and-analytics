@@ -355,7 +355,15 @@ class DataReliabilityStack(Stack):
         orders_job.add_resource_dependency(orders_table)
         recovery_job.add_resource_dependency(orders_table)
 
-        lambda_asset_path = Path(os.getenv("ABDR_LAMBDA_ASSET", str(PROJECT_DIR)))
+        configured_lambda_asset = os.getenv("ABDR_LAMBDA_ASSET")
+        lambda_asset_path = (
+            Path(configured_lambda_asset) if configured_lambda_asset else PROJECT_DIR
+        )
+        lambda_asset_excludes = (
+            []
+            if configured_lambda_asset
+            else [".venv/**", ".build/**", "infrastructure/cdk.out/**", "tests/**", "docs/**"]
+        )
 
         def function(
             logical_id: str,
@@ -379,9 +387,10 @@ class DataReliabilityStack(Stack):
                 ),
                 runtime=lambda_.Runtime.PYTHON_3_14,
                 handler=f"{LAMBDA_HANDLER_PREFIX}.{handler_module}.lambda_handler",
+                # package_agent.sh creates a deployment-only directory. Do not apply broad
+                # recursive exclusions here: botocore imports its own docs package at runtime.
                 code=lambda_.Code.from_asset(
-                    str(lambda_asset_path),
-                    exclude=[".venv", ".build", "infrastructure/cdk.out", "tests", "docs"],
+                    str(lambda_asset_path), exclude=lambda_asset_excludes
                 ),
                 timeout=timeout or Duration.minutes(2),
                 memory_size=memory_size,
