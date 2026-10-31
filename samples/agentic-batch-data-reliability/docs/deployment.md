@@ -67,11 +67,12 @@ machine ARN, and the S3 Tables child catalog.
 ```bash
 aws glue get-catalog --catalog-id s3tablescatalog --region us-east-1
 aws s3tables list-namespaces \
-  --table-bucket-arn "arn:aws:s3tables:us-east-1:${AWS_ACCOUNT_ID}:bucket/abdr-dev-curated"
+  --table-bucket-arn \
+  "arn:aws:s3tables:us-east-1:${AWS_ACCOUNT_ID}:bucket/abdr-dev-curated-${AWS_ACCOUNT_ID}"
 ```
 
-In Athena, select catalog `s3tablescatalog/abdr-dev-curated`, database `order_processing`, and table
-`orders`. Do not specify a normal S3 `LOCATION` for the S3 table.
+In Athena, select catalog `s3tablescatalog/abdr-dev-curated-<account-id>`, database
+`order_processing`, and table `orders`. Do not specify a normal S3 `LOCATION` for the S3 table.
 
 ## Deployment verification not performed by local tests
 

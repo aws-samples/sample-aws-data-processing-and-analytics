@@ -8,7 +8,7 @@ schema 55, which older v2 CLIs cannot read. Keep the CLI at least as current as 
 ## Curated table is absent in Athena
 
 - Verify `aws glue get-catalog --catalog-id s3tablescatalog` in the same Region.
-- Select child catalog `s3tablescatalog/abdr-<stage>-curated`, not `AwsDataCatalog`.
+- Select child catalog `s3tablescatalog/abdr-<stage>-curated-<account-id>`, not `AwsDataCatalog`.
 - Confirm every namespace, table, and column is lowercase.
 - Check IAM and, in Regions that require it, Lake Formation grants.
 

@@ -12,8 +12,9 @@ The display name is **AWS Data Reliability Copilot**. The repository slug remain
 | SQL identifiers | lowercase snake_case | `order_processing.orders` |
 | Enum values | UPPER_SNAKE_CASE | `PASS`, `CRITICAL` |
 
-AWS physical resources use `abdr-<stage>-<purpose>`. General S3 buckets append account and Region.
-The supported stages are `dev`, `test`, and `prod`.
+AWS physical resources use `abdr-<stage>-<purpose>`. General S3 buckets append account and Region;
+the S3 table bucket appends the account ID so repeated deployments and account-local child catalogs
+have a collision-resistant name. The supported stages are `dev`, `test`, and `prod`.
 
 Stable operational IDs use a type prefix and a deterministic digest:
 

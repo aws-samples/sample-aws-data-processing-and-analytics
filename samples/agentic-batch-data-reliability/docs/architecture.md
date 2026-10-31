@@ -39,7 +39,7 @@ flowchart LR
 
 ```text
 s3tablescatalog
-└── abdr-<stage>-curated        # table-bucket child catalog
+└── abdr-<stage>-curated-<account-id>  # table-bucket child catalog
     └── order_processing        # namespace/database
         └── orders              # Iceberg table
 ```

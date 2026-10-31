@@ -65,7 +65,7 @@ class DataReliabilityStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         prefix = f"abdr-{stage}"
         raw_database_name = f"abdr_{stage}_raw"
-        table_bucket_name = f"{prefix}-curated"
+        table_bucket_name = f"{prefix}-curated-{Aws.ACCOUNT_ID}"
         namespace_name = "order_processing"
 
         model_id = CfnParameter(
