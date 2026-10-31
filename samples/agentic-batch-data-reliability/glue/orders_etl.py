@@ -16,7 +16,6 @@ from pyspark.sql import types as T
 
 REQUIRED_ARGUMENTS = [
     "JOB_NAME",
-    "JOB_RUN_ID",
     "batch_id",
     "raw_bucket",
     "source_prefix",
@@ -52,6 +51,18 @@ def log(event: str, **details: object) -> None:
     )
 
 
+def get_job_run_id(argv: list[str]) -> str:
+    """Read Glue's built-in run ID without re-registering its CLI option."""
+
+    try:
+        value = argv[argv.index("--JOB_RUN_ID") + 1]
+    except (ValueError, IndexError) as error:
+        raise ValueError("AWS Glue did not supply --JOB_RUN_ID") from error
+    if not value or value.startswith("--"):
+        raise ValueError("AWS Glue supplied an invalid --JOB_RUN_ID value")
+    return value
+
+
 def validate_source_schema(frame: DataFrame) -> None:
     missing = sorted(REQUIRED_SOURCE_FIELDS - set(frame.columns))
     if missing:
@@ -80,6 +91,7 @@ def apply_scenario(frame: DataFrame, scenario: str, seed: int) -> DataFrame:
 
 def main() -> None:
     args = getResolvedOptions(sys.argv, REQUIRED_ARGUMENTS)
+    job_run_id = get_job_run_id(sys.argv)
     batch_id = args["batch_id"]
     source_uri = (
         f"s3://{args['raw_bucket']}/{args['source_prefix'].strip('/')}/batch_id={batch_id}/"
@@ -115,7 +127,7 @@ def main() -> None:
     log(
         "etl_started",
         batch_id=batch_id,
-        pipeline_run_id=args["JOB_RUN_ID"],
+        pipeline_run_id=job_run_id,
         source_uri=source_uri,
         scenario=args["failure_scenario"],
         spark_application_id=spark_application_id,
@@ -134,7 +146,7 @@ def main() -> None:
         F.current_timestamp().alias("ingestion_timestamp"),
         F.input_file_name().alias("source_file"),
         F.current_timestamp().alias("processing_timestamp"),
-        F.lit(args["JOB_RUN_ID"]).alias("pipeline_run_id"),
+        F.lit(job_run_id).alias("pipeline_run_id"),
     )
 
     target = f"s3tables.{args['namespace']}.{args['table_name']}"
@@ -147,7 +159,7 @@ def main() -> None:
     log(
         "etl_committed",
         batch_id=batch_id,
-        pipeline_run_id=args["JOB_RUN_ID"],
+        pipeline_run_id=job_run_id,
         target=target,
         write_mode="replace_batch",
     )
