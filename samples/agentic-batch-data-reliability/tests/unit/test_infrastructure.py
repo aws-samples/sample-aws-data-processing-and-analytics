@@ -32,6 +32,15 @@ def test_stack_contains_s3_table_reliability_workflow_and_trigger():
     synthesized.resource_count_is("AWS::Events::Rule", 1)
 
 
+def test_recovery_verification_uses_glue_integration_run_id():
+    state_machines = template().find_resources("AWS::StepFunctions::StateMachine")
+    assert len(state_machines) == 1
+    definition = str(next(iter(state_machines.values()))["Properties"]["DefinitionString"])
+
+    assert "$.recovery_job.Id" in definition
+    assert "$.recovery_job.JobRunId" not in definition
+
+
 def test_athena_workgroup_enforces_scan_and_encryption_controls():
     template().has_resource_properties(
         "AWS::Athena::WorkGroup",

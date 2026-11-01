@@ -766,7 +766,7 @@ class DataReliabilityStack(Stack):
             payload=sfn.TaskInput.from_object(
                 {
                     "batch_id": sfn.JsonPath.string_at("$.batch_id"),
-                    "pipeline_run_id": sfn.JsonPath.string_at("$.recovery_job.JobRunId"),
+                    "pipeline_run_id": sfn.JsonPath.string_at("$.recovery_job.Id"),
                     "manifest_uri": sfn.JsonPath.string_at("$.manifest_uri"),
                     "validation_kind": "recovery",
                 }
