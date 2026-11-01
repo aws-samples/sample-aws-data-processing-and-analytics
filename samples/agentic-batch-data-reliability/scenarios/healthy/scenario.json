@@ -1,0 +1,6 @@
+{
+  "scenario_id": "healthy",
+  "description": "Process every generated source record exactly once.",
+  "expected_validation_status": "PASS",
+  "investigation_expected": false
+}

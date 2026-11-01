@@ -1,0 +1,7 @@
+{
+  "scenario_id": "schema_drift",
+  "description": "Rename order_amount to amount to exercise required-schema detection.",
+  "execution_scope": "local injector and Glue input guard",
+  "expected_glue_status": "FAILED",
+  "investigation_expected": false
+}

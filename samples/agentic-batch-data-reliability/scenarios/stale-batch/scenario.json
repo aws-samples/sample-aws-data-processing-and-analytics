@@ -1,0 +1,8 @@
+{
+  "scenario_id": "stale_batch",
+  "description": "Do not deliver an expected batch before its configured deadline.",
+  "execution_scope": "validator contract; scheduler deadline event required",
+  "expected_validation_status": "FAIL",
+  "expected_failed_rules": ["batch_freshness"],
+  "investigation_expected": true
+}

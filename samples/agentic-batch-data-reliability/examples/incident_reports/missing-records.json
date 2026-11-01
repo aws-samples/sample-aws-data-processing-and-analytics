@@ -1,0 +1,44 @@
+{
+  "incident_id": "inc-example-missing-records",
+  "batch_id": "batch-example-001",
+  "severity": "CRITICAL",
+  "affected_dataset": "orders",
+  "validation_findings": [
+    "Source row count was 100 and target row count was 90.",
+    "Ten source business keys were absent from the target."
+  ],
+  "observed_facts": [
+    "The deterministic validator returned FAIL for missing_business_keys.",
+    "The Glue run state was SUCCEEDED."
+  ],
+  "root_cause_hypotheses": [
+    {
+      "hypothesis": "The configured missing_records transformation filtered the absent keys.",
+      "confidence": "HIGH",
+      "supporting_evidence": ["glue-run-example", "validation-example"],
+      "contradicting_evidence": []
+    }
+  ],
+  "supporting_evidence": [
+    {
+      "source": "deterministic validation report",
+      "reference": "validation-example",
+      "summary": "Key-level comparison found ten missing order identifiers."
+    }
+  ],
+  "investigation_limitations": [
+    "This committed example was produced from local deterministic fixtures, not a deployed AWS run."
+  ],
+  "recommended_recovery": {
+    "strategy": "replace_affected_batch",
+    "batch_id": "batch-example-001",
+    "approval_required": true
+  },
+  "approval_status": "PENDING",
+  "recovery_status": "NOT_STARTED",
+  "verification_status": "NOT_STARTED",
+  "timestamps": {
+    "investigation_started_at": "2026-01-01T00:00:00Z",
+    "investigation_completed_at": "2026-01-01T00:00:05Z"
+  }
+}
