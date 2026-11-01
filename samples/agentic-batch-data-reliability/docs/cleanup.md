@@ -6,6 +6,9 @@ make destroy STAGE=dev AWS_REGION=us-east-1
 
 The stack uses destroy policies for sample-owned S3, S3 Tables, Glue, Lambda, Step Functions,
 EventBridge, Athena, and log resources. The S3 buckets have stack-managed emptying for their versions.
+Before stack deletion, the command revokes the sample-specific Lake Formation grants while the IAM
+roles still exist. The cleanup principal therefore needs the same Lake Formation grant authority as
+the deployment principal.
 
 The command intentionally does **not** delete `s3tablescatalog`. It is a shared regional integration
 that may predate this stack or serve other table buckets. To remove it, an account administrator must
