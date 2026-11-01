@@ -35,13 +35,13 @@ permission to invoke every model in the account.
 ```bash
 export BEDROCK_MODEL_ID='<tool-capable-model-or-inference-profile-id>'
 export BEDROCK_MODEL_ARN='<exact-model-or-inference-profile-arn>'
-export BEDROCK_FOUNDATION_MODEL_ARN='<exact-underlying-foundation-model-arn>'
+export BEDROCK_FOUNDATION_MODEL_ARNS='<comma-separated-exact-destination-model-arns>'
 ```
 
-Inference-profile calls require authorization for both the profile and its underlying foundation
-model. If invoking a foundation model directly, set both ARN variables to that model ARN. Do not
-copy an example model ID blindly. Availability and inference-profile requirements vary by Region
-and account.
+Inference-profile calls require authorization for both the profile and every destination foundation
+model returned by `aws bedrock get-inference-profile`. If invoking a foundation model directly, set
+both ARN variables to that model ARN. Do not copy an example model ID blindly. Availability and
+inference-profile requirements vary by Region and account.
 
 ## Deploy
 

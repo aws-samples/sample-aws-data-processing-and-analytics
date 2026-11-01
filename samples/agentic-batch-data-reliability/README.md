@@ -116,7 +116,7 @@ Set an exact Bedrock ID and ARN, then deploy:
 ```bash
 export BEDROCK_MODEL_ID='<tool-capable-model-or-inference-profile-id>'
 export BEDROCK_MODEL_ARN='<exact-model-or-inference-profile-arn>'
-export BEDROCK_FOUNDATION_MODEL_ARN='<exact-underlying-foundation-model-arn>'
+export BEDROCK_FOUNDATION_MODEL_ARNS='<comma-separated-exact-destination-model-arns>'
 make deploy STAGE=dev AWS_REGION=us-east-1
 ```
 

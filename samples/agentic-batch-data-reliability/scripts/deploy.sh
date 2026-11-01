@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 : "${BEDROCK_MODEL_ID:?Set BEDROCK_MODEL_ID to a tool-capable model or inference-profile ID}"
 : "${BEDROCK_MODEL_ARN:?Set BEDROCK_MODEL_ARN to the exact resource ARN allowed for invocation}"
-: "${BEDROCK_FOUNDATION_MODEL_ARN:?Set BEDROCK_FOUNDATION_MODEL_ARN to the exact underlying foundation-model ARN}"
+: "${BEDROCK_FOUNDATION_MODEL_ARNS:?Set BEDROCK_FOUNDATION_MODEL_ARNS to the comma-separated exact destination model ARNs}"
 
 if [[ ! "${STAGE}" =~ ^(dev|test|prod)$ ]]; then
   echo "Stage must be dev, test, or prod" >&2
@@ -25,7 +25,7 @@ export ABDR_LAMBDA_ASSET="${PROJECT_DIR}/.build/lambda"
     --require-approval broadening \
     --parameters "BedrockModelId=${BEDROCK_MODEL_ID}" \
     --parameters "BedrockModelArn=${BEDROCK_MODEL_ARN}" \
-    --parameters "BedrockFoundationModelArn=${BEDROCK_FOUNDATION_MODEL_ARN}"
+    --parameters "BedrockFoundationModelArns=${BEDROCK_FOUNDATION_MODEL_ARNS}"
 )
 
 "${PROJECT_DIR}/scripts/enable_s3_tables_integration.sh" "${REGION}"

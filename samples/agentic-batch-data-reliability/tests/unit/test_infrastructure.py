@@ -74,29 +74,28 @@ def test_lambda_functions_do_not_require_account_concurrency_reservations():
 
 
 def test_bedrock_permission_uses_parameterized_exact_resource():
-    template().has_resource_properties(
-        "AWS::IAM::Policy",
-        {
-            "PolicyDocument": {
-                "Statement": Match.array_with(
-                    [
-                        Match.object_like(
-                            {
-                                "Action": [
-                                    "bedrock:InvokeModel",
-                                    "bedrock:InvokeModelWithResponseStream",
-                                ],
-                                "Resource": [
-                                    {"Ref": "BedrockModelArn"},
-                                    {"Ref": "BedrockFoundationModelArn"},
-                                ],
-                            }
-                        )
-                    ]
-                )
-            }
-        },
-    )
+    synthesized = template()
+    for parameter in ("BedrockModelArn", "BedrockFoundationModelArns"):
+        synthesized.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Action": [
+                                        "bedrock:InvokeModel",
+                                        "bedrock:InvokeModelWithResponseStream",
+                                    ],
+                                    "Resource": {"Ref": parameter},
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
 
 
 def test_validation_role_can_request_lake_formation_data_access():

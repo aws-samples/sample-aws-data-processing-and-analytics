@@ -82,15 +82,14 @@ class DataReliabilityStack(Stack):
             description="Exact Bedrock model or inference-profile ARN allowed for invocation.",
             allowed_pattern=r"^arn:[a-z0-9-]+:bedrock:[a-z0-9-]*:[0-9]*:.+$",
         )
-        foundation_model_arn = CfnParameter(
+        foundation_model_arns = CfnParameter(
             self,
-            "BedrockFoundationModelArn",
-            type="String",
+            "BedrockFoundationModelArns",
+            type="CommaDelimitedList",
             description=(
-                "Exact foundation-model ARN used by the selected inference profile. "
-                "Use the same ARN as BedrockModelArn when invoking a foundation model directly."
+                "Exact foundation-model ARNs used by every destination of the selected inference "
+                "profile. Use the same ARN as BedrockModelArn when invoking a model directly."
             ),
-            allowed_pattern=r"^arn:[a-z0-9-]+:bedrock:[a-z0-9-]*:[0-9]*:.+$",
         )
 
         Tags.of(self).add("Project", "aws-data-reliability-copilot")
@@ -477,7 +476,13 @@ class DataReliabilityStack(Stack):
         investigation_function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-                resources=[model_arn.value_as_string, foundation_model_arn.value_as_string],
+                resources=[model_arn.value_as_string],
+            )
+        )
+        investigation_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=foundation_model_arns.value_as_list,
             )
         )
         investigation_function.add_to_role_policy(
